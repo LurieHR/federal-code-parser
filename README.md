@@ -150,6 +150,15 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Reference Materials
+
+The `references/` directory contains:
+- **USLM-User-Guide.pdf/rtf** - Official USLM (United States Legislative Markup) documentation
+- **schemaandcss/** - XML schemas and CSS files for USC data validation
+- **DETAILED GUIDE TO THE UNITED STATES CODE CONTENT** - Additional documentation
+
+These materials are essential for understanding the USC XML structure and were used to develop this parser.
+
 ## Acknowledgments
 
 - XML data provided by the Office of Law Revision Counsel
