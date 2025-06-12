@@ -4,14 +4,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
-    name="usc-parser",
+    name="federal-code-parser",
     version="1.0.0",
-    author="Your Name",
+    author="LurieHR",
     author_email="your.email@example.com",
     description="A parser for United States Code XML files",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/usc-parser",
+    url="https://github.com/LurieHR/federal-code-parser",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 4 - Beta",

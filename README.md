@@ -14,8 +14,8 @@ A Python library for parsing United States Code (USC) XML files and extracting s
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/usc-parser.git
-cd usc-parser
+git clone https://github.com/LurieHR/federal-code-parser.git
+cd federal-code-parser
 pip install -r requirements.txt
 ```
 
