@@ -1148,14 +1148,72 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     except:
         is_positive_law = False
     
+    # Extract actual child elements that exist in the XML
+    def extract_element_content(elem):
+        """Recursively extract element content preserving structure"""
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        
+        # Get element attributes
+        attrs = dict(elem.attrib) if elem.attrib else {}
+        
+        # Get direct text content
+        text = elem.text.strip() if elem.text else ''
+        
+        # Get child elements
+        children = {}
+        for child in elem:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if child_tag in children:
+                # Handle multiple children with same tag (convert to list)
+                if not isinstance(children[child_tag], list):
+                    children[child_tag] = [children[child_tag]]
+                children[child_tag].append(extract_element_content(child))
+            else:
+                children[child_tag] = extract_element_content(child)
+        
+        # Build result
+        result = {}
+        if attrs:
+            result['attributes'] = attrs
+        if text:
+            result['text'] = text
+        if children:
+            result.update(children)
+            
+        # For elements with children, also capture the complete text content
+        if children and tag == 'p':
+            full_text = ''.join(elem.itertext()).strip()
+            if full_text:
+                result['paragraph_text'] = full_text
+        
+        # If element has no attributes, text, or children, return the tail text if any
+        if not result and elem.tail and elem.tail.strip():
+            return elem.tail.strip()
+        
+        return result if result else None
+    
+    child_elements = {}
+    for child in element:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        content = extract_element_content(child)
+        if content:
+            child_elements[tag] = content
+    
+    # Build ancestors list from top to bottom (furthest to nearest)
+    ancestors = []
+    for ancestor in ancestor_path:
+        tag = ancestor['tag'].capitalize()
+        identifier = ancestor.get('attributes', {}).get('identifier', '')
+        if identifier:
+            ancestors.append(f"{tag}:{identifier}")
+    
     return {
-        # Raw XML fields (original names)
+        # Element info
         "tag": element_info['tag'],
-        "num": element_number,
-        "heading": heading,
-        "content": text_content,
         "attributes": element_attributes,
-        "notes": notes_structure,
+        
+        # Actual child elements from XML
+        **child_elements,
         
         # Computed/derived fields (not in original XML)
         "computed": {
@@ -1167,7 +1225,8 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
             "subsection_count": subsection_info['subsection_count'],
             "amendment_history": amendment_history,
             "source_credit": source_credit,
-            "related_laws": related_laws
+            "related_laws": related_laws,
+            "ancestors": "; ".join(ancestors)
         },
         
         # Hierarchical context (ancestor path without current element)
@@ -1345,7 +1404,7 @@ def main():
     
     # Save results
     with open(output_file, 'w') as f:
-        json.dump(laws, f, indent=2)
+        json.dump(laws, f, indent=2, ensure_ascii=False)
     print(f"\nResults saved to {output_file}")
 
 
@@ -1376,7 +1435,18 @@ if __name__ == "__main__":
         print(f"Filtered to {len(filtered_laws)} {args.type} elements")
     
     if args.num:
-        filtered_laws = [law for law in filtered_laws if args.num in law['num']]
+        def num_contains(law, search_num):
+            num_field = law.get('num', '')
+            if isinstance(num_field, dict):
+                # Check in text field and value attribute
+                text = num_field.get('text', '')
+                value = num_field.get('attributes', {}).get('value', '')
+                return search_num in text or search_num in value
+            else:
+                # Fallback for string format
+                return search_num in str(num_field)
+        
+        filtered_laws = [law for law in filtered_laws if num_contains(law, args.num)]
         print(f"Filtered to {len(filtered_laws)} elements with num containing '{args.num}'")
     
     # Show summary by element type if no specific filters
@@ -1390,7 +1460,7 @@ if __name__ == "__main__":
     # Save to JSON if requested
     if args.output:
         with open(args.output, 'w') as f:
-            json.dump(filtered_laws, f, indent=2)
+            json.dump(filtered_laws, f, indent=2, ensure_ascii=False)
         print(f"\nSaved {len(filtered_laws)} elements to {args.output}")
     else:
         # Show filtered results
@@ -1398,7 +1468,7 @@ if __name__ == "__main__":
         print(f"\nShowing first {len(display_laws)} results:")
         for i, law in enumerate(display_laws):
             print(f"\n{i+1}. Element:")
-            print(json.dumps(law, indent=4))
+            print(json.dumps(law, indent=4, ensure_ascii=False))
         
         if len(filtered_laws) > 10:
             print(f"\n... and {len(filtered_laws) - 10} more results")
