@@ -583,18 +583,6 @@ def calculate_text_hash(text: str) -> str:
     return hashlib.sha256(normalized_text.encode('utf-8')).hexdigest()
 
 
-def build_citation(title_num: str, section_num: str) -> str:
-    """
-    Create a legal citation string.
-    
-    Args:
-        title_num: Title number
-        section_num: Section number
-        
-    Returns:
-        Formatted citation (e.g., "5 U.S.C. § 1201")
-    """
-    return f"{title_num} U.S.C. § {section_num}"
 
 
 def build_parent_citation(hierarchy: Dict[str, Any], title_number: int) -> Optional[str]:
@@ -1100,70 +1088,8 @@ def build_hierarchy_from_path(full_path: List[Dict[str, Any]], metadata: Dict[st
     return hierarchy
 
 
-def extract_title_number_from_metadata(metadata: Dict[str, Any], hierarchy: Dict[str, Any]) -> str:
-    """
-    Extract title number from metadata or hierarchy.
-    
-    Args:
-        metadata: Document metadata
-        hierarchy: Hierarchy dictionary
-        
-    Returns:
-        Title number as string
-    """
-    # Try from hierarchy first
-    if hierarchy.get('title') and hierarchy['title'].get('num'):
-        title_num = hierarchy['title']['num']
-        # Extract numeric part
-        match = re.search(r'(\d+[A-Za-z]*)', title_num)
-        if match:
-            return match.group(1)
-    
-    # Try from metadata
-    if metadata.get('dc:title'):
-        title_text = metadata['dc:title']
-        title_match = re.match(r'Title (\d+[A-Za-z]*)', title_text)
-        if title_match:
-            return title_match.group(1)
-    
-    # Default fallback
-    return "unknown"
 
 
-def build_parent_citation_from_path(ancestor_path: List[Dict[str, Any]], title_number: str) -> str:
-    """
-    Build parent citation from ancestor path.
-    
-    Args:
-        ancestor_path: List of ancestor elements
-        title_number: Title number
-        
-    Returns:
-        Parent citation string
-    """
-    # Find the most specific parent
-    for ancestor in reversed(ancestor_path):
-        tag = ancestor['tag']
-        num = ancestor['num']
-        
-        if tag == 'subpart' and num:
-            parent_num = re.sub(r'^(Subpart\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
-            return f"{title_number} U.S.C. Subpart {parent_num}"
-        elif tag == 'part' and num:
-            parent_num = re.sub(r'^(PART\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
-            return f"{title_number} U.S.C. Part {parent_num}"
-        elif tag == 'subchapter' and num:
-            parent_num = re.sub(r'^(SUBCHAPTER\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
-            return f"{title_number} U.S.C. Subch. {parent_num}"
-        elif tag == 'chapter' and num:
-            parent_num = re.sub(r'^(CHAPTER\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
-            return f"{title_number} U.S.C. Ch. {parent_num}"
-        elif tag == 'subtitle' and num:
-            parent_num = re.sub(r'^(SUBTITLE\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
-            return f"{title_number} U.S.C. Subtitle {parent_num}"
-    
-    # Default to title
-    return f"{title_number} U.S.C."
 
 
 def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1192,26 +1118,7 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     heading = element_info['heading']
     
     
-    # Build hierarchy from ancestor path
-    hierarchy = build_hierarchy_from_path(full_path, meta)
     
-    # Extract title number from meta or hierarchy
-    title_number = extract_title_number_from_metadata(meta, hierarchy)
-    
-    # Build citation (only for section elements)
-    if element_info['tag'] == 'section' and element_number:
-        # Clean section number (remove § and punctuation)
-        section_match = re.search(r'§?\s*(\d+[a-zA-Z]?)', element_number)
-        if section_match:
-            clean_number = section_match.group(1)
-        else:
-            clean_number = element_number.strip('§. ')
-        citation = build_citation(str(title_number), clean_number)
-    else:
-        citation = f"{title_number} U.S.C. {element_info['tag']}"
-    
-    # Get parent citation
-    parent_citation = build_parent_citation_from_path(ancestor_path, title_number)
     
     # Extract structured notes for all elements
     notes_structure = extract_notes_structure(element)
@@ -1255,19 +1162,18 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
             "processing_timestamp": time.time(),
             "processing_machine": socket.gethostname(),
             "content_length": len(text_content),
+            "file_source": filename,
             "has_subsections": subsection_info['has_subsections'],
             "subsection_count": subsection_info['subsection_count'],
             "amendment_history": amendment_history,
             "source_credit": source_credit,
-            "related_laws": related_laws,
-            "law_hierarchy": hierarchy
+            "related_laws": related_laws
         },
         
         # Hierarchical context (ancestor path without current element)
         "ancestor_path": ancestor_path,
         
-        # Document metadata
-        "file_source": filename,
+        # Document metadata (from <meta> element)
         "meta": meta
     }
 
