@@ -38,12 +38,18 @@ import re
 import hashlib
 import zipfile
 import urllib.request
+import socket
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
 
 
-NAMESPACE = {'uslm': 'http://xml.house.gov/schemas/uslm/1.0'}
+NAMESPACE = {
+    'uslm': 'http://xml.house.gov/schemas/uslm/1.0',
+    'dc': 'http://purl.org/dc/elements/1.1/',
+    'dcterms': 'http://purl.org/dc/terms/'
+}
 USC_XML_URL = "https://uscode.house.gov/download/releasepoints/us/pl/119/12/xml_uscAll@119-12.zip"
 DEFAULT_XML_DIR = "xml_uscAll@119-12"
 
@@ -122,7 +128,143 @@ def parse_usc_file(filepath: str) -> ET.Element:
     return tree.getroot()
 
 
-def extract_sections(doc: ET.Element) -> List[ET.Element]:
+def helper_find_all_tags(element: ET.Element, tags_counter: Dict[str, int] = None) -> Dict[str, int]:
+    """
+    Recursively find all unique tags in the document.
+    
+    Args:
+        element: XML element to process
+        tags_counter: Dictionary to count tags (created if None)
+        
+    Returns:
+        Dictionary with tag names as keys and counts as values
+    """
+    if tags_counter is None:
+        tags_counter = {}
+    
+    # Get tag without namespace
+    tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+    tags_counter[tag] = tags_counter.get(tag, 0) + 1
+    
+    # Recurse through children
+    for child in element:
+        helper_find_all_tags(child, tags_counter)
+    
+    return tags_counter
+
+
+def get_element_text_content(element: ET.Element) -> str:
+    """
+    Extract all text content from an element, similar to get_section_text.
+    
+    Args:
+        element: XML element
+        
+    Returns:
+        Complete text content of the element
+    """
+    text_parts = []
+    
+    def extract_text_recursive(elem):
+        if elem.text:
+            text_parts.append(elem.text.strip())
+        for child in elem:
+            # Skip certain metadata elements
+            if not child.tag.endswith(('sourceCredit', 'meta')):
+                extract_text_recursive(child)
+            if child.tail:
+                text_parts.append(child.tail.strip())
+    
+    extract_text_recursive(element)
+    return ' '.join(text_parts)
+
+
+def traverse_with_ancestor_paths(element: ET.Element, current_path: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """
+    Traverse document and extract ALL elements with their complete ancestor paths.
+    
+    Args:
+        element: XML element to process
+        current_path: Current ancestor path (list of ancestor info)
+        
+    Returns:
+        List of all element data with ancestor paths
+    """
+    if current_path is None:
+        current_path = []
+    
+    results = []
+    
+    # Get element tag without namespace
+    tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+    
+    # Define hierarchical structural elements that should be part of the path
+    hierarchical_tags = {
+        'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
+        'chapter', 'subchapter', 'article', 'appendix'
+    }
+    
+    # Get basic element info
+    num_elem = element.find('./uslm:num', NAMESPACE)
+    num = num_elem.text.strip() if num_elem is not None and num_elem.text else ''
+    
+    heading_elem = element.find('./uslm:heading', NAMESPACE)
+    heading = heading_elem.text.strip() if heading_elem is not None and heading_elem.text else ''
+    
+    # Get text content and length
+    text_content = get_element_text_content(element)
+    content_length = len(text_content)
+    
+    # Build element info with ALL attributes preserved
+    element_info = {
+        'tag': tag,
+        'num': num,
+        'heading': heading,
+        'attributes': extract_all_element_attributes(element)
+    }
+    
+    # If this is a hierarchical element, add it to the path and continue
+    if tag in hierarchical_tags:
+        new_path = current_path + [element_info]
+        
+        # Continue traversing with the extended path
+        for child in element:
+            results.extend(traverse_with_ancestor_paths(child, new_path))
+    
+    # For ALL elements (including hierarchical ones), extract them as content items
+    # Only extract if they have some text content or are leaf nodes
+    if content_length > 0 or len(list(element)) == 0:
+        results.append({
+            'content_element': element,
+            'element_info': element_info,
+            'ancestor_path': current_path,  # Everything above this element
+            'full_path': current_path + [element_info],  # Including the element
+            'text_content': text_content
+        })
+    
+    # If not hierarchical, still traverse children
+    if tag not in hierarchical_tags:
+        for child in element:
+            results.extend(traverse_with_ancestor_paths(child, current_path))
+    
+    return results
+
+
+def list_chapter_elements(doc: ET.Element) -> List[ET.Element]:
+    """
+    Find all chapter elements in the document.
+    
+    Args:
+        doc: Root element of the USC XML document
+        
+    Returns:
+        List of chapter elements
+    """
+    chapters = doc.findall('.//uslm:chapter', NAMESPACE)
+    return chapters
+
+
+def list_section_elements(doc: ET.Element) -> List[ET.Element]:
     """
     Find all section elements in the document.
     
@@ -233,31 +375,49 @@ def get_section_status(section: ET.Element) -> str:
     return 'operational'
 
 
-def extract_notes(section: ET.Element) -> List[str]:
+def extract_notes_structure(element: ET.Element) -> Dict[str, Any]:
     """
-    Extract notes from a section.
+    Extract structured notes from an element.
     
     Args:
-        section: Section element
+        element: XML element
         
     Returns:
-        List of note texts
+        Dictionary with structured notes information
     """
-    notes = []
+    notes_structure = {}
     
-    # Extract source credit
-    source_credit = section.find('.//uslm:sourceCredit', NAMESPACE)
-    if source_credit is not None and source_credit.text:
-        notes.append(f"Source: {source_credit.text.strip()}")
+    # Find notes container
+    notes_container = element.find('.//uslm:notes', NAMESPACE)
+    if notes_container is not None:
+        notes_structure['attributes'] = extract_all_element_attributes(notes_container)
+        notes_structure['topics'] = {}
+        
+        # Extract each note by topic
+        note_elements = notes_container.findall('./uslm:note', NAMESPACE)
+        for note in note_elements:
+            topic = note.get('topic', 'unknown')
+            role = note.get('role', '')
+            
+            note_data = {
+                'attributes': extract_all_element_attributes(note),
+                'content': ''.join(note.itertext()).strip()
+            }
+            
+            # Extract heading if present
+            heading_elem = note.find('./uslm:heading', NAMESPACE)
+            if heading_elem is not None:
+                note_data['heading'] = {
+                    'text': heading_elem.text.strip() if heading_elem.text else '',
+                    'attributes': extract_all_element_attributes(heading_elem)
+                }
+            
+            # Group by topic, handle multiple notes with same topic
+            if topic not in notes_structure['topics']:
+                notes_structure['topics'][topic] = []
+            notes_structure['topics'][topic].append(note_data)
     
-    # Extract other notes
-    note_elements = section.findall('.//uslm:notes//uslm:note', NAMESPACE)
-    for note in note_elements:
-        note_text = ''.join(note.itertext()).strip()
-        if note_text:
-            notes.append(note_text)
-    
-    return notes
+    return notes_structure
 
 
 def extract_source_credit(section: ET.Element) -> Dict[str, Optional[str]]:
@@ -517,7 +677,7 @@ def count_subsections(section: ET.Element) -> Dict[str, Any]:
     return subsection_info
 
 
-def get_law_hierarchy(section: ET.Element, title_number: int, doc_root: Optional[ET.Element] = None) -> Dict[str, Any]:
+def get_law_hierarchy(section: ET.Element, title_str: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract the complete hierarchical structure for a section.
     
@@ -689,16 +849,14 @@ def get_related_laws(section: ET.Element) -> Dict[str, List[str]]:
     return related
 
 
-def build_law_dict(section: ET.Element, title_number: int, is_positive_law: bool = True, filename: str = '', doc_root: Optional[ET.Element] = None) -> Optional[Dict[str, Any]]:
+def build_law_dict(section: ET.Element, filename: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Convert a section element to a comprehensive dictionary.
     
     Args:
         section: Section element
-        title_number: USC title number
-        is_positive_law: Whether this title is positive law
-        filename: Source filename
-        doc_root: Root document element for metadata extraction
+        filename: Source filename (e.g., 'usc50A.xml')
+        metadata: Document-level metadata dictionary
         
     Returns:
         Dictionary with law information or None if section should be skipped
@@ -822,30 +980,304 @@ def build_law_dict(section: ET.Element, title_number: int, is_positive_law: bool
     }
 
 
-def get_title_number_from_filename(filename: str) -> Optional[int]:
+def extract_meta(doc: ET.Element) -> Dict[str, Any]:
     """
-    Extract title number from filename.
+    Extract all metadata from the USC XML document.
     
     Args:
-        filename: XML filename (e.g., 'usc05.xml')
+        doc: Root element of the USC XML document
         
     Returns:
-        Title number or None
+        Dictionary containing all metadata fields
     """
-    match = re.match(r'usc(\d+)\.xml', filename)
-    if match:
-        return int(match.group(1))
-    return None
+    metadata = {}
+    meta_elem = doc.find('.//uslm:meta', NAMESPACE)
+    
+    if meta_elem is not None:
+        # Extract Dublin Core metadata
+        dc_title = meta_elem.find('.//dc:title', NAMESPACE)
+        if dc_title is not None and dc_title.text:
+            metadata['dc:title'] = dc_title.text
+            
+        dc_type = meta_elem.find('.//dc:type', NAMESPACE)
+        if dc_type is not None and dc_type.text:
+            metadata['dc:type'] = dc_type.text
+            
+        dc_publisher = meta_elem.find('.//dc:publisher', NAMESPACE)
+        if dc_publisher is not None and dc_publisher.text:
+            metadata['dc:publisher'] = dc_publisher.text
+            
+        dc_creator = meta_elem.find('.//dc:creator', NAMESPACE)
+        if dc_creator is not None and dc_creator.text:
+            metadata['dc:creator'] = dc_creator.text
+            
+        dcterms_created = meta_elem.find('.//dcterms:created', NAMESPACE)
+        if dcterms_created is not None and dcterms_created.text:
+            metadata['dcterms:created'] = dcterms_created.text
+            
+        # Extract USLM-specific metadata
+        doc_number = meta_elem.find('.//uslm:docNumber', NAMESPACE)
+        if doc_number is not None and doc_number.text:
+            metadata['docNumber'] = doc_number.text
+            
+        doc_pub_name = meta_elem.find('.//uslm:docPublicationName', NAMESPACE)
+        if doc_pub_name is not None and doc_pub_name.text:
+            metadata['docPublicationName'] = doc_pub_name.text
+            
+        # Extract properties
+        properties = meta_elem.findall('.//uslm:property', NAMESPACE)
+        for prop in properties:
+            role = prop.get('role')
+            if role and prop.text:
+                metadata[f'property[@role="{role}"]'] = prop.text
+                
+    return metadata
 
 
-def parse_single_title(filepath: str, title_number: int, is_positive_law: bool = True) -> List[Dict[str, Any]]:
+def extract_all_element_attributes(element: ET.Element) -> Dict[str, Any]:
     """
-    Parse a single USC title file and extract all laws.
+    Extract all attributes from an XML element preserving original names.
+    
+    Args:
+        element: XML element
+        
+    Returns:  
+        Dictionary with all element attributes
+    """
+    return dict(element.attrib)
+
+
+def build_hierarchy_from_path(full_path: List[Dict[str, Any]], metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build hierarchy dictionary from ancestor path.
+    
+    Args:
+        full_path: Complete path including section (from traverse_with_ancestor_paths)
+        metadata: Document-level metadata
+        
+    Returns:
+        Hierarchy dictionary with all available levels
+    """
+    hierarchy = {
+        'title': None,
+        'subtitle': None, 
+        'part': None,
+        'subpart': None,
+        'division': None,
+        'subdivision': None,
+        'chapter': None,
+        'subchapter': None,
+        'article': None,
+        'appendix': None,
+        'section': None
+    }
+    
+    # Process each element in the path
+    for path_element in full_path:
+        tag = path_element['tag']
+        if tag in hierarchy:
+            # Extract all available info including all attributes
+            element_info = {
+                'num': path_element['num'],
+                'heading': path_element['heading'],
+                'attributes': path_element.get('attributes', {})
+            }
+            # Remove empty values to keep clean
+            element_info = {k: v for k, v in element_info.items() if v}
+            hierarchy[tag] = element_info
+    
+    # Add title info from metadata if available
+    if hierarchy['title'] is None and metadata.get('dc:title'):
+        title_text = metadata['dc:title']
+        # Extract title number and name
+        title_match = re.match(r'Title (\d+[A-Za-z]*)\s*[-—]\s*(.*)', title_text)
+        if title_match:
+            hierarchy['title'] = {
+                'num': title_match.group(1),
+                'heading': title_match.group(2)
+            }
+    
+    return hierarchy
+
+
+def extract_title_number_from_metadata(metadata: Dict[str, Any], hierarchy: Dict[str, Any]) -> str:
+    """
+    Extract title number from metadata or hierarchy.
+    
+    Args:
+        metadata: Document metadata
+        hierarchy: Hierarchy dictionary
+        
+    Returns:
+        Title number as string
+    """
+    # Try from hierarchy first
+    if hierarchy.get('title') and hierarchy['title'].get('num'):
+        title_num = hierarchy['title']['num']
+        # Extract numeric part
+        match = re.search(r'(\d+[A-Za-z]*)', title_num)
+        if match:
+            return match.group(1)
+    
+    # Try from metadata
+    if metadata.get('dc:title'):
+        title_text = metadata['dc:title']
+        title_match = re.match(r'Title (\d+[A-Za-z]*)', title_text)
+        if title_match:
+            return title_match.group(1)
+    
+    # Default fallback
+    return "unknown"
+
+
+def build_parent_citation_from_path(ancestor_path: List[Dict[str, Any]], title_number: str) -> str:
+    """
+    Build parent citation from ancestor path.
+    
+    Args:
+        ancestor_path: List of ancestor elements
+        title_number: Title number
+        
+    Returns:
+        Parent citation string
+    """
+    # Find the most specific parent
+    for ancestor in reversed(ancestor_path):
+        tag = ancestor['tag']
+        num = ancestor['num']
+        
+        if tag == 'subpart' and num:
+            parent_num = re.sub(r'^(Subpart\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
+            return f"{title_number} U.S.C. Subpart {parent_num}"
+        elif tag == 'part' and num:
+            parent_num = re.sub(r'^(PART\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
+            return f"{title_number} U.S.C. Part {parent_num}"
+        elif tag == 'subchapter' and num:
+            parent_num = re.sub(r'^(SUBCHAPTER\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
+            return f"{title_number} U.S.C. Subch. {parent_num}"
+        elif tag == 'chapter' and num:
+            parent_num = re.sub(r'^(CHAPTER\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
+            return f"{title_number} U.S.C. Ch. {parent_num}"
+        elif tag == 'subtitle' and num:
+            parent_num = re.sub(r'^(SUBTITLE\s*)', '', num, flags=re.IGNORECASE).strip('—- ')
+            return f"{title_number} U.S.C. Subtitle {parent_num}"
+    
+    # Default to title
+    return f"{title_number} U.S.C."
+
+
+def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Convert element data with ancestor paths to a comprehensive dictionary.
+    
+    Args:
+        element_data: Element data with ancestor paths from traverse_with_ancestor_paths()
+        filename: Source filename (e.g., 'usc50A.xml')
+        metadata: Document-level metadata dictionary
+        
+    Returns:
+        Dictionary with law information or None if element should be skipped
+    """
+    element = element_data['content_element']
+    element_info = element_data['element_info']
+    ancestor_path = element_data['ancestor_path']
+    full_path = element_data['full_path']
+    text_content = element_data['text_content']
+    
+    # Get element status (use general status function)
+    status = element.get('status', 'operational')
+    
+    # Get element number and heading
+    element_number = element_info['num']
+    heading = element_info['heading']
+    
+    
+    # Build hierarchy from ancestor path
+    hierarchy = build_hierarchy_from_path(full_path, meta)
+    
+    # Extract title number from meta or hierarchy
+    title_number = extract_title_number_from_metadata(meta, hierarchy)
+    
+    # Build citation (only for section elements)
+    if element_info['tag'] == 'section' and element_number:
+        # Clean section number (remove § and punctuation)
+        section_match = re.search(r'§?\s*(\d+[a-zA-Z]?)', element_number)
+        if section_match:
+            clean_number = section_match.group(1)
+        else:
+            clean_number = element_number.strip('§. ')
+        citation = build_citation(str(title_number), clean_number)
+    else:
+        citation = f"{title_number} U.S.C. {element_info['tag']}"
+    
+    # Get parent citation
+    parent_citation = build_parent_citation_from_path(ancestor_path, title_number)
+    
+    # Extract structured notes for all elements
+    notes_structure = extract_notes_structure(element)
+    
+    # Get additional information (mainly for section elements)
+    if element_info['tag'] == 'section':
+        subsection_info = count_subsections(element)
+        related_laws = get_related_laws(element)
+        amendment_history = extract_amendment_history(element)
+        source_credit = extract_source_credit(element)
+    else:
+        subsection_info = {'has_subsections': False, 'subsection_count': 0}
+        related_laws = {'cross_references': [], 'executive_orders': [], 'public_laws': [], 'statutes_at_large': []}
+        amendment_history = []
+        source_credit = {}
+    
+    # Get element attributes
+    element_attributes = element_info.get('attributes', {})
+    
+    
+    # Determine if positive law (simplified logic for now)
+    try:
+        title_num_int = int(re.match(r'(\d+)', title_number).group(1))
+        is_positive_law = title_num_int in {1, 3, 4, 5, 9, 10, 11, 13, 14, 17, 18, 23, 
+                                          28, 31, 32, 35, 36, 37, 38, 39, 40, 41, 44, 
+                                          46, 49, 51, 52, 54}
+    except:
+        is_positive_law = False
+    
+    return {
+        # Raw XML fields (original names)
+        "tag": element_info['tag'],
+        "num": element_number,
+        "heading": heading,
+        "content": text_content,
+        "attributes": element_attributes,
+        "notes": notes_structure,
+        
+        # Computed/derived fields (not in original XML)
+        "computed": {
+            "processing_timestamp": time.time(),
+            "processing_machine": socket.gethostname(),
+            "content_length": len(text_content),
+            "has_subsections": subsection_info['has_subsections'],
+            "subsection_count": subsection_info['subsection_count'],
+            "amendment_history": amendment_history,
+            "source_credit": source_credit,
+            "related_laws": related_laws,
+            "law_hierarchy": hierarchy
+        },
+        
+        # Hierarchical context (ancestor path without current element)
+        "ancestor_path": ancestor_path,
+        
+        # Document metadata
+        "file_source": filename,
+        "meta": meta
+    }
+
+
+def parse_single_title(filepath: str) -> List[Dict[str, Any]]:
+    """
+    Parse a single USC title file and extract all laws using ancestor path traversal.
     
     Args:
         filepath: Path to the XML file
-        title_number: USC title number
-        is_positive_law: Whether this title is positive law
         
     Returns:
         List of law dictionaries
@@ -857,12 +1289,19 @@ def parse_single_title(filepath: str, title_number: int, is_positive_law: bool =
         # Parse the file
         doc = parse_usc_file(filepath)
         
-        # Extract all sections
-        sections = extract_sections(doc)
+        # Extract meta from the document
+        meta = extract_meta(doc)
         
-        # Convert each section to a dictionary
-        for section in sections:
-            law_dict = build_law_dict(section, title_number, is_positive_law, filename, doc)
+        # Get all elements with their complete ancestor paths
+        elements_with_paths = traverse_with_ancestor_paths(doc)
+        
+        # Convert each element+path to a law dictionary
+        for element_data in elements_with_paths:
+            law_dict = build_law_dict_with_path(
+                element_data=element_data,
+                filename=filename,
+                meta=meta
+            )
             if law_dict:
                 laws.append(law_dict)
                 
@@ -894,7 +1333,7 @@ def parse_all_titles(xml_dir: str) -> List[Dict[str, Any]]:
     xml_files.sort()
     
     for xml_file in xml_files:
-        title_num = get_title_number_from_filename(xml_file)
+        title_num = get_title_from_filename(xml_file)
         if title_num is None:
             continue
             
@@ -1005,4 +1444,55 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    import json
+    
+    parser = argparse.ArgumentParser(description='Parse USC XML files')
+    parser.add_argument('--title', required=True, help='USC title to parse (e.g., usc05, usc50A)')
+    parser.add_argument('--xml-dir', default='xml_uscAll@119-12', help='Directory containing XML files')
+    parser.add_argument('--output', help='Output JSON file (optional)')
+    parser.add_argument('--type', help='Filter by element type (e.g., section, chapter, note)')
+    parser.add_argument('--num', help='Filter by element number (e.g., 10, 1201)')
+    
+    args = parser.parse_args()
+    
+    # Build filepath
+    filepath = f"{args.xml_dir}/{args.title}.xml"
+    
+    print(f"Parsing {filepath}...")
+    laws = parse_single_title(filepath)
+    print(f"Found {len(laws)} elements")
+    
+    # Apply filters
+    filtered_laws = laws
+    if args.type:
+        filtered_laws = [law for law in filtered_laws if law['tag'] == args.type]
+        print(f"Filtered to {len(filtered_laws)} {args.type} elements")
+    
+    if args.num:
+        filtered_laws = [law for law in filtered_laws if args.num in law['num']]
+        print(f"Filtered to {len(filtered_laws)} elements with num containing '{args.num}'")
+    
+    # Show summary by element type if no specific filters
+    if not args.type and not args.num:
+        from collections import Counter
+        element_counts = Counter(law['tag'] for law in laws)
+        print("\nElement types found:")
+        for tag, count in sorted(element_counts.items()):
+            print(f"  {tag}: {count}")
+    
+    # Save to JSON if requested
+    if args.output:
+        with open(args.output, 'w') as f:
+            json.dump(filtered_laws, f, indent=2)
+        print(f"\nSaved {len(filtered_laws)} elements to {args.output}")
+    else:
+        # Show filtered results
+        display_laws = filtered_laws[:10]  # Show up to 10 results
+        print(f"\nShowing first {len(display_laws)} results:")
+        for i, law in enumerate(display_laws):
+            print(f"\n{i+1}. Element:")
+            print(json.dumps(law, indent=4))
+        
+        if len(filtered_laws) > 10:
+            print(f"\n... and {len(filtered_laws) - 10} more results")

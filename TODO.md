@@ -2,7 +2,21 @@
 
 ## Core Dictionary Structure Improvements
 
-### 1. Temporal/Version Tracking Fields
+### 1. Text Chunking for RAG Systems
+- [ ] Implement configurable text chunking strategies:
+  - [ ] Section-level chunking (current approach)
+  - [ ] Subsection-level chunking with hierarchical markers
+  - [ ] Paragraph-level chunking for long sections
+  - [ ] Smart chunking based on token/character limits
+- [ ] Preserve hierarchical context with each chunk:
+  - [ ] Include parent section/subsection metadata
+  - [ ] Maintain citation information per chunk
+  - [ ] Add chunk sequence numbers
+- [ ] Implement overlap between chunks for context continuity
+- [ ] Add chunk size configuration (characters/tokens)
+- [ ] Create chunk relationship mapping
+
+### 2. Temporal/Version Tracking Fields
 - [ ] Add `temporal_info` dictionary to each law:
   - [ ] Extract `createdDate` from section attributes
   - [ ] Extract `effectiveDate` from section attributes
@@ -10,7 +24,7 @@
   - [ ] Implement `extract_last_amendment_date()` function
   - [ ] Add file modification date tracking
 
-### 2. Enhanced Hierarchy Information
+### 3. Enhanced Hierarchy Information
 - [ ] Expand `law_hierarchy` to include full path:
   - [ ] Title (number and name)
   - [ ] Subtitle (if exists)
@@ -19,11 +33,11 @@
   - [ ] Part (number and title)
   - [ ] Subpart (if exists)
   - [ ] Section number
-- [ ] Add `parent_citation` field (e.g., "5 U.S.C. Ch. 12")
-- [ ] Add `has_subsections` boolean field
-- [ ] Add `subsection_count` field
+- [x] Add `parent_citation` field (e.g., "5 U.S.C. Ch. 12") - COMPLETED
+- [x] Add `has_subsections` boolean field - COMPLETED
+- [x] Add `subsection_count` field - COMPLETED
 
-### 3. Amendment History Tracking
+### 4. Amendment History Tracking
 - [ ] Create `amendment_history` list with:
   - [ ] Public Law number (e.g., "Pub. L. 117-286")
   - [ ] Amendment date
@@ -32,15 +46,15 @@
 - [ ] Parse amendment information from notes sections
 - [ ] Extract from sourceCredit elements
 
-### 4. Unique Identifiers
-- [ ] Add `identifiers` dictionary:
-  - [ ] GUID from `@id` attribute
-  - [ ] URL path from `@identifier` attribute
-  - [ ] Temporal ID from `@temporalId`
-  - [ ] Legacy ID from `@name` attribute
-- [ ] Add SHA256 hash of law text for change detection
+### 5. Unique Identifiers
+- [x] Add `identifiers` dictionary - COMPLETED:
+  - [x] GUID from `@id` attribute - COMPLETED
+  - [x] URL path from `@identifier` attribute - COMPLETED
+  - [x] Temporal ID from `@temporalId` - COMPLETED
+  - [x] Legacy ID from `@name` attribute - COMPLETED
+- [x] Add SHA256 hash of law text for change detection - COMPLETED
 
-### 5. Legislative Source Information
+### 6. Legislative Source Information
 - [ ] Create `legislative_source` dictionary:
   - [ ] Original act name
   - [ ] Original public law number
@@ -49,9 +63,10 @@
 - [ ] Implement `extract_legislative_history()` function
 - [ ] Parse sourceCredit for Public Law references
 
-### 6. Enhanced Cross-References
+### 7. Enhanced Cross-References
 - [ ] Expand `related_laws` structure:
-  - [ ] `cites_to`: Laws this section references
+  - [x] `cross_references`: Basic references extracted - COMPLETED
+  - [ ] `cites_to`: Laws this section references (needs enhancement)
   - [ ] `cited_by`: Laws that reference this section (requires post-processing)
   - [ ] `see_also`: Related provisions
   - [ ] `supersedes`: Laws this replaced
@@ -60,20 +75,20 @@
 
 ## New Functions to Implement
 
-### 7. Parsing Functions
+### 8. Parsing Functions
 - [ ] `extract_legislative_history(section)` - Parse source credits
 - [ ] `parse_source_credit(text)` - Extract Pub. L., dates, Stat. references
 - [ ] `extract_last_amendment_date(section)` - Find most recent amendment
-- [ ] `extract_subsection_info(section)` - Count and identify subsections
-- [ ] `calculate_text_hash(text)` - Generate SHA256 for change detection
+- [x] `count_subsections(section)` - Count and identify subsections - COMPLETED
+- [x] `calculate_text_hash(text)` - Generate SHA256 for change detection - COMPLETED
 
-### 8. Post-Processing Functions
+### 9. Post-Processing Functions
 - [ ] `build_hierarchy_index(all_sections)` - Create parent-child relationships
 - [ ] `build_citation_index(all_sections)` - Create lookup by citation
 - [ ] `build_cross_reference_index(all_sections)` - Map bidirectional references
 - [ ] `validate_references(all_sections)` - Ensure all refs resolve
 
-### 9. Change Tracking
+### 10. Change Tracking
 - [ ] Add `change_tracking` dictionary:
   - [ ] Version (e.g., "119-12")
   - [ ] Last updated timestamp
@@ -84,18 +99,18 @@
 
 ## Processing Pipeline Enhancements
 
-### 10. Two-Pass Processing
+### 11. Two-Pass Processing
 - [ ] First pass: Extract all sections with basic info
 - [ ] Second pass: Build cross-references and relationships
 - [ ] Third pass: Validate all references resolve correctly
 
-### 11. Additional Metadata
+### 12. Additional Metadata
 - [ ] Add `extraction_date` timestamp
 - [ ] Add `parser_version` for tracking
 - [ ] Add `validation_status` field
 - [ ] Add `processing_notes` for any issues
 
-### 12. Output Enhancements
+### 13. Output Enhancements
 - [ ] Create separate index files:
   - [ ] Citation index (citation -> law dict)
   - [ ] Topic index (topic -> list of laws)
@@ -108,13 +123,39 @@
 
 ## Data Quality Improvements
 
-### 13. Validation
+### 14. USLM Schema Compliance Verification
+- [ ] Verify parser handles all USC XML structure elements per USLM User Guide:
+  - [ ] **Title-level elements**: title, subtitle, chapter, subchapter, part, subpart
+  - [ ] **Section-level elements**: section, subsection, paragraph, subparagraph, clause, subclause
+  - [ ] **Content elements**: num, heading, chapeau, content, continuation
+  - [ ] **Cross-reference elements**: ref, quotedContent, date
+  - [ ] **Amendment elements**: amendingAction, changingText
+- [ ] Ensure correct parsing of all note types:
+  - [ ] **Editorial Notes**: codification, priorProvisions, amendments, changeOfName, etc.
+  - [ ] **Statutory Notes**: effectiveDateNote, constructionNote, executiveDocuments, etc.
+  - [ ] **Source Credit Notes**: act citations, public law references, statutes at large
+  - [ ] **Historical and Revision Notes**: derivation tables, revision notes
+- [ ] Verify appendix parsing:
+  - [ ] Appendix structure and content
+  - [ ] Appendix cross-references
+  - [ ] Appendix notes and amendments
+- [ ] Test parser against all title types:
+  - [ ] Positive law titles (enacted as a whole)
+  - [ ] Non-positive law titles (editorial compilations)
+  - [ ] Titles with appendices
+  - [ ] Repealed/reserved sections
+- [ ] Validate metadata extraction:
+  - [ ] Document-level metadata (meta element)
+  - [ ] Section attributes (@status, @style, etc.)
+  - [ ] Temporal attributes (@created, @through, etc.)
+
+### 15. Validation
 - [ ] Validate all citations follow proper format
 - [ ] Check for orphaned references
 - [ ] Verify hierarchy consistency
 - [ ] Ensure required fields are present
 
-### 14. Error Handling
+### 16. Error Handling
 - [ ] Add graceful handling for missing elements
 - [ ] Log parsing errors with context
 - [ ] Create error report for manual review
@@ -200,20 +241,38 @@
 
 ## Priority Order
 
-1. **High Priority** (Core functionality):
+1. **Immediate Priority** (RAG optimization):
+   - Text chunking for RAG systems
+   - Chunk size configuration
+   - Hierarchical context preservation
+
+2. **High Priority** (Core functionality):
+   - USLM schema compliance verification
    - Temporal tracking fields
-   - Complete hierarchy extraction
+   - Complete hierarchy extraction (title names, chapter titles)
    - Amendment history parsing
    - Enhanced cross-references
+   - Legislative source information
+   - Comprehensive note type parsing (Editorial, Statutory, Historical)
 
-2. **Medium Priority** (Improves usability):
+3. **Medium Priority** (Improves usability):
    - Two-pass processing
    - Citation index generation
    - Change tracking
    - Validation system
+   - Error handling improvements
 
-3. **Low Priority** (Nice to have):
+4. **Low Priority** (Nice to have):
    - Version comparison
    - Statistical reports
    - Topic indexing
    - Error reporting dashboard
+
+## Completed Items
+- ✓ Basic identifiers dictionary (GUID, URL path, temporal ID)
+- ✓ SHA256 text hash implementation
+- ✓ Parent citation field
+- ✓ Has subsections / subsection count
+- ✓ Basic cross-reference extraction
+- ✓ count_subsections() function
+- ✓ calculate_text_hash() function
