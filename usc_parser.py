@@ -250,32 +250,6 @@ def traverse_with_ancestor_paths(element: ET.Element, current_path: List[Dict[st
     return results
 
 
-def list_chapter_elements(doc: ET.Element) -> List[ET.Element]:
-    """
-    Find all chapter elements in the document.
-    
-    Args:
-        doc: Root element of the USC XML document
-        
-    Returns:
-        List of chapter elements
-    """
-    chapters = doc.findall('.//uslm:chapter', NAMESPACE)
-    return chapters
-
-
-def list_section_elements(doc: ET.Element) -> List[ET.Element]:
-    """
-    Find all section elements in the document.
-    
-    Args:
-        doc: Root element of the USC XML document
-        
-    Returns:
-        List of section elements
-    """
-    sections = doc.findall('.//uslm:section', NAMESPACE)
-    return sections
 
 
 def get_section_text(section: ET.Element) -> str:
@@ -420,69 +394,6 @@ def extract_notes_structure(element: ET.Element) -> Dict[str, Any]:
     return notes_structure
 
 
-def extract_source_credit(section: ET.Element) -> Dict[str, Optional[str]]:
-    """
-    Extract source credit information from sourceCredit element.
-    
-    Args:
-        section: Section element
-        
-    Returns:
-        Dictionary with source credit information
-    """
-    source_credit_info = {
-        'original_act': None,
-        'original_public_law': None,
-        'original_date': None,
-        'original_statutes': None,
-        'codification_authority': None
-    }
-    
-    source_credit = section.find('.//uslm:sourceCredit', NAMESPACE)
-    if source_credit is not None:
-        # Get all refs and dates in sourceCredit
-        refs = source_credit.findall('.//uslm:ref', NAMESPACE)
-        dates = source_credit.findall('.//uslm:date', NAMESPACE)
-        
-        # The first Public Law reference is typically the original enacting law
-        for i, ref in enumerate(refs):
-            href = ref.get('href', '')
-            if '/pl/' in href:
-                # Extract public law info
-                pl_match = re.search(r'/pl/(\d+)/(\d+)', href)
-                if pl_match:
-                    source_credit_info['original_public_law'] = f"Pub. L. {pl_match.group(1)}-{pl_match.group(2)}"
-                    
-                    # Get the corresponding date
-                    if i < len(dates):
-                        source_credit_info['original_date'] = dates[i].get('date')
-                    
-                    # Look for the next Stat reference
-                    source_text = ''.join(source_credit.itertext())
-                    stat_match = re.search(rf"Pub\. L\. {pl_match.group(1)}[–-]{pl_match.group(2)}.*?(\d+\s+Stat\.\s+\d+)", source_text)
-                    if stat_match:
-                        source_credit_info['original_statutes'] = stat_match.group(1)
-                    
-                    # For Title 5, check if it's the 1966 codification
-                    if pl_match.group(1) == "89" and pl_match.group(2) == "554":
-                        source_credit_info['codification_authority'] = "Title 5 Codification Act of 1966"
-                    
-                    break
-        
-        # Try to extract act name from notes if available
-        notes = section.find('.//uslm:notes', NAMESPACE)
-        if notes is not None:
-            # Look for short title notes
-            short_title_notes = notes.findall('.//uslm:note[@topic="shortTitle"]', NAMESPACE)
-            for note in short_title_notes:
-                note_text = ''.join(note.itertext())
-                # Extract act name from quotes
-                act_match = re.search(r'["\']([^"\']*?Act[^"\']*?)["\']', note_text)
-                if act_match:
-                    source_credit_info['original_act'] = act_match.group(1)
-                    break
-    
-    return source_credit_info
 
 
 def extract_amendment_history(section: ET.Element) -> List[Dict[str, str]]:
@@ -1128,12 +1039,10 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         subsection_info = count_subsections(element)
         related_laws = get_related_laws(element)
         amendment_history = extract_amendment_history(element)
-        source_credit = extract_source_credit(element)
     else:
         subsection_info = {'has_subsections': False, 'subsection_count': 0}
         related_laws = {'cross_references': [], 'executive_orders': [], 'public_laws': [], 'statutes_at_large': []}
         amendment_history = []
-        source_credit = {}
     
     # Get element attributes
     element_attributes = element_info.get('attributes', {})
@@ -1150,7 +1059,7 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     
     # Extract actual child elements that exist in the XML
     def extract_element_content(elem):
-        """Recursively extract element content preserving structure"""
+        """Recursively extract element content preserving document order"""
         tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
         
         # Get element attributes
@@ -1159,17 +1068,16 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         # Get direct text content
         text = elem.text.strip() if elem.text else ''
         
-        # Get child elements
-        children = {}
+        # Get child elements in document order
+        children_in_order = []
         for child in elem:
             child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            if child_tag in children:
-                # Handle multiple children with same tag (convert to list)
-                if not isinstance(children[child_tag], list):
-                    children[child_tag] = [children[child_tag]]
-                children[child_tag].append(extract_element_content(child))
-            else:
-                children[child_tag] = extract_element_content(child)
+            child_content = extract_element_content(child)
+            if child_content:
+                children_in_order.append({
+                    'tag': child_tag,
+                    'content': child_content
+                })
         
         # Build result
         result = {}
@@ -1177,11 +1085,11 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
             result['attributes'] = attrs
         if text:
             result['text'] = text
-        if children:
-            result.update(children)
+        if children_in_order:
+            result['children_in_order'] = children_in_order
             
         # For elements with children, also capture the complete text content
-        if children and tag == 'p':
+        if children_in_order and tag == 'p':
             full_text = ''.join(elem.itertext()).strip()
             if full_text:
                 result['paragraph_text'] = full_text
@@ -1207,6 +1115,34 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         if identifier:
             ancestors.append(f"{tag}:{identifier}")
     
+    
+    # List child elements in document order
+    def list_child_elements_in_order():
+        """List child elements in the order they appear in the document"""
+        child_order = []
+        for child in element:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            child_order.append(tag)
+        return child_order
+    
+    # Create document-order readable text
+    def create_document_order_text():
+        """Walk through child elements in order and extract all text"""
+        result_parts = []
+        tag_order = []
+        
+        for child in element:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            child_text = ''.join(child.itertext())
+            
+            result_parts.append(child_text)
+            tag_order.append(tag)
+        
+        return {
+            'text': '\n\n'.join(result_parts),
+            'tag_order': ' -> '.join(tag_order)
+        }
+    
     return {
         # Element info
         "tag": element_info['tag'],
@@ -1224,9 +1160,10 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
             "has_subsections": subsection_info['has_subsections'],
             "subsection_count": subsection_info['subsection_count'],
             "amendment_history": amendment_history,
-            "source_credit": source_credit,
             "related_laws": related_laws,
-            "ancestors": "; ".join(ancestors)
+            "ancestors": "; ".join(ancestors),
+            "child_elements_order": list_child_elements_in_order(),
+            "document_order_text": create_document_order_text()
         },
         
         # Hierarchical context (ancestor path without current element)
