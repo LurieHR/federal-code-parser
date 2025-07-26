@@ -1034,15 +1034,11 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     # Extract structured notes for all elements
     notes_structure = extract_notes_structure(element)
     
-    # Get additional information (mainly for section elements)
+    # Get additional information only for section elements
     if element_info['tag'] == 'section':
         subsection_info = count_subsections(element)
         related_laws = get_related_laws(element)
         amendment_history = extract_amendment_history(element)
-    else:
-        subsection_info = {'has_subsections': False, 'subsection_count': 0}
-        related_laws = {'cross_references': [], 'executive_orders': [], 'public_laws': [], 'statutes_at_large': []}
-        amendment_history = []
     
     # Get element attributes
     element_attributes = element_info.get('attributes', {})
@@ -1143,6 +1139,34 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
             'tag_order': ' -> '.join(tag_order)
         }
     
+    # Build computed fields
+    computed_fields = {
+        "processing_timestamp": time.time(),
+        "processing_machine": socket.gethostname(),
+        "content_length": len(text_content),
+        "file_source": filename,
+        "ancestors": "; ".join(ancestors),
+        "child_elements_order": list_child_elements_in_order(),
+        "document_order_text": create_document_order_text()
+    }
+    
+    # Add section-specific computed fields only for sections
+    if element_info['tag'] == 'section':
+        computed_fields.update({
+            "has_subsections": subsection_info['has_subsections'],
+            "subsection_count": subsection_info['subsection_count'],
+            "amendment_history": amendment_history,
+            "related_laws": related_laws
+        })
+    
+    # Add hierarchical element own content extraction
+    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
+                        'chapter', 'subchapter', 'article', 'appendix'}
+    
+    if element_info['tag'] in hierarchical_tags:
+        own_content_data = extract_own_content_text(element)
+        computed_fields.update(own_content_data)
+
     return {
         # Element info
         "tag": element_info['tag'],
@@ -1152,25 +1176,337 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         **child_elements,
         
         # Computed/derived fields (not in original XML)
-        "computed": {
-            "processing_timestamp": time.time(),
-            "processing_machine": socket.gethostname(),
-            "content_length": len(text_content),
-            "file_source": filename,
-            "has_subsections": subsection_info['has_subsections'],
-            "subsection_count": subsection_info['subsection_count'],
-            "amendment_history": amendment_history,
-            "related_laws": related_laws,
-            "ancestors": "; ".join(ancestors),
-            "child_elements_order": list_child_elements_in_order(),
-            "document_order_text": create_document_order_text()
-        },
+        "computed": computed_fields,
         
         # Hierarchical context (ancestor path without current element)
         "ancestor_path": ancestor_path,
         
         # Document metadata (from <meta> element)
         "meta": meta
+    }
+
+
+def extract_text_skip_footnote_content(element: ET.Element) -> str:
+    """
+    Extract text with footnote references inline and footnote content at bottom.
+    """
+    text_parts = []
+    footnotes = []
+    
+    def collect_text_and_footnotes(elem):
+        # Add element's direct text
+        if elem.text:
+            text_parts.append(elem.text.strip())
+        
+        # Process children
+        for child in elem:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            
+            if child_tag == 'note' and child.get('type') == 'footnote':
+                # Collect footnote content for bottom section
+                footnote_text = ''.join(child.itertext()).strip()
+                if footnote_text:
+                    footnotes.append(footnote_text)
+            elif child_tag == 'ref' and 'footnoteRef' in child.get('class', ''):
+                # Include footnote reference inline
+                if child.text:
+                    text_parts.append(f"[{child.text.strip()}]")
+            else:
+                # Recursively process other children
+                collect_text_and_footnotes(child)
+            
+            # Add tail text
+            if child.tail:
+                text_parts.append(child.tail.strip())
+    
+    # Start the collection
+    collect_text_and_footnotes(element)
+    
+    # Combine main text with footnotes at bottom
+    main_text = ' '.join(text_parts).strip()
+    if footnotes:
+        footnote_section = '\n\nFootnotes:\n' + '\n'.join(footnotes)
+        return main_text + footnote_section
+    else:
+        return main_text
+
+
+def parse_toc(toc_element: ET.Element) -> str:
+    """
+    Parse table of contents with footnote references inline and all footnotes at bottom.
+    """
+    lines = []
+    all_footnotes = []
+    
+    # Check for header (like "Sec.")
+    header = toc_element.find('.//uslm:header[@role="tocColumnHeader"]', NAMESPACE)
+    header_text = ""
+    if header is not None:
+        header_text = ''.join(header.itertext()).strip()
+    
+    for item in toc_element.findall('.//uslm:tocItem', NAMESPACE):
+        left_col = item.find('.//uslm:column[@class="twoColumnLeft"]', NAMESPACE)  
+        right_col = item.find('.//uslm:column[@class="twoColumnRight"]', NAMESPACE)
+        
+        if left_col is not None and right_col is not None:
+            left_text = ''.join(left_col.itertext()).strip()
+            
+            # Process right column: collect text with references, collect footnotes
+            right_text_parts = []
+            footnotes_in_this_item = []
+            
+            def process_right_col(elem):
+                if elem.text:
+                    right_text_parts.append(elem.text.strip())
+                
+                for child in elem:
+                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    
+                    if child_tag == 'ref' and 'footnoteRef' in child.get('class', ''):
+                        # Add inline reference
+                        if child.text:
+                            right_text_parts.append(f"[{child.text.strip()}]")
+                    elif child_tag == 'note' and child.get('type') == 'footnote':
+                        # Collect footnote for bottom section
+                        footnote_text = ''.join(child.itertext()).strip()
+                        if footnote_text:
+                            footnotes_in_this_item.append(footnote_text)
+                    else:
+                        # Recursively process other elements
+                        process_right_col(child)
+                    
+                    if child.tail:
+                        right_text_parts.append(child.tail.strip())
+            
+            process_right_col(right_col)
+            right_text = ' '.join(right_text_parts).strip()
+            
+            # Add this line to TOC
+            if left_text and right_text:
+                lines.append(f"{left_text} {right_text}")
+            
+            # Add footnotes to master list
+            all_footnotes.extend(footnotes_in_this_item)
+    
+    # Build final TOC
+    toc_parts = ["Table of Contents:"]
+    if header_text:
+        toc_parts.append(header_text)
+    toc_parts.extend(lines)
+    toc_text = "\n".join(toc_parts)
+    
+    # Add all footnotes at bottom
+    if all_footnotes:
+        footnote_section = "\n\nFootnotes:\n" + "\n".join(all_footnotes)
+        return toc_text + footnote_section
+    else:
+        return toc_text
+
+
+def format_element_text(element: ET.Element) -> str:
+    """
+    Format element text with better spacing and line breaks.
+    """
+    if element.tag.endswith('num'):
+        return element.text.strip() if element.text else ''
+    elif element.tag.endswith('heading'):
+        return element.text.strip() if element.text else ''
+    elif element.tag.endswith('toc'):
+        # Use dedicated TOC parser
+        return parse_toc(element)
+    elif element.tag.endswith('notes'):
+        # Format notes section nicely  
+        notes_parts = []
+        for note in element.findall('.//uslm:note', NAMESPACE):
+            topic = note.get('topic', '')
+            if topic == 'amendments':
+                notes_parts.append("Amendments:")
+                for p in note.findall('.//uslm:p', NAMESPACE):
+                    p_text = ''.join(p.itertext()).strip()
+                    if p_text:
+                        notes_parts.append(f"  {p_text}")
+            elif topic == 'editorialNotes':
+                heading = note.find('.//uslm:heading', NAMESPACE)
+                if heading is not None:
+                    heading_text = ''.join(heading.itertext()).strip()
+                    if heading_text:
+                        notes_parts.append(heading_text)
+        return "\n".join(notes_parts) if notes_parts else ""
+    else:
+        # Default: just extract text with some spacing
+        return ''.join(element.itertext()).strip()
+
+
+def extract_own_content_text(element: ET.Element) -> Dict[str, Any]:
+    """
+    Extract an element's own text content, excluding child sections/subchapters.
+    Returns text content and child pointers.
+    
+    Args:
+        element: XML element
+        
+    Returns:
+        Dictionary with own_content_text, child_pointers, etc.
+    """
+    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
+                        'chapter', 'subchapter', 'article', 'appendix'}
+    
+    own_content_parts = []
+    child_pointers = []
+    
+    for child in element:
+        child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        
+        # Skip child hierarchical elements and sections - create pointers
+        if child_tag in hierarchical_tags or child_tag == 'section':
+            child_num_elem = child.find('./uslm:num', NAMESPACE)
+            child_num = child_num_elem.text.strip() if child_num_elem is not None and child_num_elem.text else ''
+            child_identifier = child.get('identifier', '')
+            child_heading_elem = child.find('./uslm:heading', NAMESPACE)
+            child_heading = child_heading_elem.text.strip() if child_heading_elem is not None and child_heading_elem.text else ''
+            
+            child_pointers.append({
+                'tag': child_tag,
+                'num': child_num,
+                'heading': child_heading,
+                'identifier': child_identifier
+            })
+        else:
+            # Include this as own content with better formatting
+            child_text = format_element_text(child)
+            if child_text:
+                own_content_parts.append(child_text)
+    
+    own_content_text = '\n\n'.join(own_content_parts)
+    
+    return {
+        "own_content_text": own_content_text,
+        "own_content_length": len(own_content_text),
+        "child_pointers": child_pointers,
+        "num_children": len(child_pointers)
+    }
+
+
+def extract_hierarchical_own_content(element_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract a hierarchical element's own content, excluding child sections/subchapters.
+    Returns a dictionary similar to other parsed elements but only with the element's
+    direct content (like toc, notes, etc.) and pointers to children.
+    
+    Args:
+        element_data: Element data from traverse_with_ancestor_paths()
+        
+    Returns:
+        Dictionary with element's own content and child pointers
+    """
+    element = element_data['content_element']
+    element_info = element_data['element_info']
+    
+    tag = element_info['tag']
+    
+    # Only process hierarchical container elements
+    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
+                        'chapter', 'subchapter', 'article', 'appendix'}
+    
+    if tag not in hierarchical_tags:
+        return None
+    
+    # Define helper function first
+    def extract_element_content(elem):
+        """Recursively extract element content preserving document order"""
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+        
+        attrs = dict(elem.attrib) if elem.attrib else {}
+        text = elem.text.strip() if elem.text else ''
+        
+        children_in_order = []
+        for child in elem:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            child_content = extract_element_content(child)
+            if child_content:
+                children_in_order.append({
+                    'tag': child_tag,
+                    'content': child_content
+                })
+        
+        result = {}
+        if attrs:
+            result['attributes'] = attrs
+        if text:
+            result['text'] = text
+        if children_in_order:
+            result['children_in_order'] = children_in_order
+        
+        return result if result else None
+    
+    # Extract own content (skip child hierarchical elements and sections)
+    own_child_elements = {}
+    child_pointers = []
+    
+    for child in element:
+        child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        
+        # Skip child hierarchical elements and sections - just create pointers
+        if child_tag in hierarchical_tags or child_tag == 'section':
+            child_num_elem = child.find('./uslm:num', NAMESPACE)
+            child_num = child_num_elem.text.strip() if child_num_elem is not None and child_num_elem.text else ''
+            child_identifier = child.get('identifier', '')
+            child_heading_elem = child.find('./uslm:heading', NAMESPACE)
+            child_heading = child_heading_elem.text.strip() if child_heading_elem is not None and child_heading_elem.text else ''
+            
+            child_pointers.append({
+                'tag': child_tag,
+                'num': child_num,
+                'heading': child_heading,
+                'identifier': child_identifier
+            })
+        else:
+            # Include this as part of the element's own content
+            content = extract_element_content(child)
+            if content:
+                if child_tag in own_child_elements:
+                    # Handle multiple children with same tag
+                    if not isinstance(own_child_elements[child_tag], list):
+                        own_child_elements[child_tag] = [own_child_elements[child_tag]]
+                    own_child_elements[child_tag].append(content)
+                else:
+                    own_child_elements[child_tag] = content
+    
+    # Extract readable text content (excluding sections/subchapters)
+    content_text_parts = []
+    for child in element:
+        child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        
+        # Skip child hierarchical elements and sections
+        if child_tag not in hierarchical_tags and child_tag != 'section':
+            child_text = ''.join(child.itertext()).strip()
+            if child_text:
+                content_text_parts.append(child_text)
+    
+    chapter_content_text = '\n\n'.join(content_text_parts)
+    
+    # Add computed field for child pointers
+    computed_fields = {
+        "child_pointers": child_pointers,
+        "num_children": len(child_pointers),
+        "content_text": chapter_content_text,
+        "content_length": len(chapter_content_text)
+    }
+    
+    return {
+        # Element info
+        "tag": element_info['tag'],
+        "attributes": element_info.get('attributes', {}),
+        
+        # Own content (excluding child sections/subchapters)
+        **own_child_elements,
+        
+        # Computed fields
+        "computed": computed_fields,
+        
+        # Context
+        "ancestor_path": element_data['ancestor_path'],
+        "meta": element_data.get('meta', {})
     }
 
 
@@ -1400,12 +1736,26 @@ if __name__ == "__main__":
             json.dump(filtered_laws, f, indent=2, ensure_ascii=False)
         print(f"\nSaved {len(filtered_laws)} elements to {args.output}")
     else:
-        # Show filtered results
+        # Show filtered results with pretty printing
         display_laws = filtered_laws[:10]  # Show up to 10 results
         print(f"\nShowing first {len(display_laws)} results:")
         for i, law in enumerate(display_laws):
             print(f"\n{i+1}. Element:")
-            print(json.dumps(law, indent=4, ensure_ascii=False))
+            
+            # Pretty print the own_content_text if it exists
+            if 'computed' in law and 'own_content_text' in law['computed']:
+                own_content = law['computed']['own_content_text']
+                law_copy = law.copy()
+                law_copy['computed'] = law['computed'].copy()
+                law_copy['computed']['own_content_text'] = "[PRETTY PRINTED BELOW]"
+                
+                print(json.dumps(law_copy, indent=4, ensure_ascii=False))
+                print("\nPRETTY PRINTED CONTENT:")
+                print("=" * 50)
+                print(own_content)
+                print("=" * 50)
+            else:
+                print(json.dumps(law, indent=4, ensure_ascii=False))
         
         if len(filtered_laws) > 10:
             print(f"\n... and {len(filtered_laws) - 10} more results")
