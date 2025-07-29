@@ -53,6 +53,12 @@ NAMESPACE = {
 USC_XML_URL = "https://uscode.house.gov/download/releasepoints/us/pl/119/12/xml_uscAll@119-12.zip"
 DEFAULT_XML_DIR = "xml_uscAll@119-12"
 
+# Define hierarchical structural elements that should be part of the path
+HIERARCHICAL_TAGS = {
+    'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
+    'chapter', 'subchapter', 'article', 'appendix', 'section'
+}
+
 
 def ensure_xml_data_exists(xml_dir: str = DEFAULT_XML_DIR) -> bool:
     """
@@ -147,7 +153,7 @@ def helper_find_all_tags(element: ET.Element, tags_counter: Dict[str, int] = Non
     tags_counter[tag] = tags_counter.get(tag, 0) + 1
     
     # Recurse through children
-    for child in element:
+    for child in xml_element:
         helper_find_all_tags(child, tags_counter)
     
     return tags_counter
@@ -179,7 +185,7 @@ def get_element_text_content(element: ET.Element) -> str:
     return ' '.join(text_parts)
 
 
-def traverse_with_ancestor_paths(element: ET.Element, current_path: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+def traverse_with_ancestor_paths(xml_element: ET.Element, current_path: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Traverse document and extract ALL elements with their complete ancestor paths.
     
@@ -196,55 +202,42 @@ def traverse_with_ancestor_paths(element: ET.Element, current_path: List[Dict[st
     results = []
     
     # Get element tag without namespace
-    tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+    tag = xml_element.tag.split('}')[-1] if '}' in xml_element.tag else xml_element.tag
     
-    # Define hierarchical structural elements that should be part of the path
-    hierarchical_tags = {
-        'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
-        'chapter', 'subchapter', 'article', 'appendix'
-    }
     
     # Get basic element info
-    num_elem = element.find('./uslm:num', NAMESPACE)
+    num_elem = xml_element.find('./uslm:num', NAMESPACE)
     num = num_elem.text.strip() if num_elem is not None and num_elem.text else ''
     
-    heading_elem = element.find('./uslm:heading', NAMESPACE)
+    heading_elem = xml_element.find('./uslm:heading', NAMESPACE)
     heading = heading_elem.text.strip() if heading_elem is not None and heading_elem.text else ''
-    
-    # Get text content and length
-    text_content = get_element_text_content(element)
-    content_length = len(text_content)
     
     # Build element info with ALL attributes preserved
     element_info = {
         'tag': tag,
         'num': num,
         'heading': heading,
-        'attributes': extract_all_element_attributes(element)
+        'attributes': extract_all_element_attributes(xml_element)
     }
     
     # If this is a hierarchical element, add it to the path and continue
-    if tag in hierarchical_tags:
+    if tag in HIERARCHICAL_TAGS:
         new_path = current_path + [element_info]
         
         # Continue traversing with the extended path
-        for child in element:
+        for child in xml_element:
             results.extend(traverse_with_ancestor_paths(child, new_path))
     
     # For ALL elements (including hierarchical ones), extract them as content items
-    # Only extract if they have some text content or are leaf nodes
-    if content_length > 0 or len(list(element)) == 0:
-        results.append({
-            'content_element': element,
-            'element_info': element_info,
-            'ancestor_path': current_path,  # Everything above this element
-            'full_path': current_path + [element_info],  # Including the element
-            'text_content': text_content
-        })
+    results.append({
+        'xml_element': xml_element,
+        'element_info': element_info,
+        'ancestor_path': current_path  # Everything above this element
+    })
     
     # If not hierarchical, still traverse children
-    if tag not in hierarchical_tags:
-        for child in element:
+    if tag not in HIERARCHICAL_TAGS:
+        for child in xml_element:
             results.extend(traverse_with_ancestor_paths(child, current_path))
     
     return results
@@ -252,45 +245,6 @@ def traverse_with_ancestor_paths(element: ET.Element, current_path: List[Dict[st
 
 
 
-def get_section_text(section: ET.Element) -> str:
-    """
-    Extract all text content from a section element.
-    
-    Args:
-        section: Section element
-        
-    Returns:
-        Complete text content of the section
-    """
-    text_parts = []
-    
-    # Function to recursively extract text from an element
-    def extract_text(elem):
-        if elem.text:
-            text_parts.append(elem.text.strip())
-        for child in elem:
-            # Skip certain elements like sourceCredit and notes
-            if child.tag.endswith(('sourceCredit', 'notes')):
-                continue
-            extract_text(child)
-            if child.tail:
-                text_parts.append(child.tail.strip())
-    
-    # Extract text from content elements
-    content_elems = section.findall('.//uslm:content', NAMESPACE)
-    for content in content_elems:
-        extract_text(content)
-    
-    # Also check for chapeau and continuation elements
-    chapeau = section.find('.//uslm:chapeau', NAMESPACE)
-    if chapeau is not None:
-        extract_text(chapeau)
-        
-    continuation = section.find('.//uslm:continuation', NAMESPACE)
-    if continuation is not None:
-        extract_text(continuation)
-    
-    return ' '.join(text_parts)
 
 
 def get_cross_references(section: ET.Element) -> List[str]:
@@ -320,33 +274,6 @@ def get_cross_references(section: ET.Element) -> List[str]:
     
     return list(set(references))  # Remove duplicates
 
-
-def get_section_status(section: ET.Element) -> str:
-    """
-    Determine the status of a section.
-    
-    Args:
-        section: Section element
-        
-    Returns:
-        Status string (operational, repealed, vacant, reserved)
-    """
-    # Check for status attribute
-    status = section.get('status')
-    if status:
-        return status
-    
-    # Check heading for common indicators
-    heading = section.find('.//uslm:heading', NAMESPACE)
-    if heading is not None and heading.text:
-        heading_text = heading.text.lower()
-        if 'repealed' in heading_text:
-            return 'repealed'
-        elif 'reserved' in heading_text:
-            return 'reserved'
-    
-    # Default to operational
-    return 'operational'
 
 
 def extract_notes_structure(element: ET.Element) -> Dict[str, Any]:
@@ -695,6 +622,116 @@ def get_law_hierarchy(section: ET.Element, title_str: str, metadata: Dict[str, A
     return hierarchy
 
 
+def extract_all_references(element: ET.Element) -> Dict[str, List[str]]:
+    """
+    Extract all types of references from any element.
+    
+    Args:
+        element: Any XML element
+        
+    Returns:
+        Dictionary with different types of references
+    """
+    references = {
+        # From <ref> elements
+        'usc_references': [],          # USC section/chapter references
+        'act_references': [],          # Act references 
+        'public_law_hrefs': [],        # Public law from href (same as public_laws_text)
+        'statute_hrefs': [],           # Statutes from href (same as statutes_text)
+        
+        # From text patterns
+        'public_laws_text': [],        # Public law from text (same as public_law_hrefs)
+        'statutes_text': [],           # Statutes from text (same as statute_hrefs)
+        'executive_orders': [],        # Executive orders (text only, no hrefs)
+        'federal_register': [],        # Federal Register citations (e.g., "75 F.R. 707")
+    }
+    
+    # First, extract from ref elements
+    ref_elements = element.findall('.//uslm:ref', NAMESPACE)
+    
+    for ref in ref_elements:
+        href = ref.get('href', '')
+        if not href:
+            continue
+            
+        # USC references: /us/usc/t5/s1202 or /us/usc/t5/ch12
+        usc_match = re.match(r'/us/usc/t(\d+[A-Za-z]*)/([sc])(\d+[A-Za-z]*)', href)
+        if usc_match:
+            title, type_char, num = usc_match.groups()
+            if type_char == 's':
+                citation = f"{title} U.S.C. § {num}"
+            else:  # chapter
+                citation = f"{title} U.S.C. Ch. {num}"
+            references['usc_references'].append(citation)
+            continue
+            
+        # Act references: /us/act/1947-07-30/ch388
+        act_match = re.match(r'/us/act/([^/]+)/(.+)', href)
+        if act_match:
+            date, details = act_match.groups()
+            act_ref = f"Act of {date}, {details}"
+            references['act_references'].append(act_ref)
+            continue
+            
+        # Public law references: /us/pl/117/286
+        pl_match = re.match(r'/us/pl/(\d+)/(\d+)', href)
+        if pl_match:
+            congress, law_num = pl_match.groups()
+            public_law = f"Pub. L. {congress}-{law_num}"
+            references['public_law_hrefs'].append(public_law)
+            continue
+            
+        # Statute references: /us/stat/116/926
+        stat_match = re.match(r'/us/stat/(\d+[A-Za-z]*)/(\d+)', href)
+        if stat_match:
+            volume, page = stat_match.groups()
+            statute = f"{volume} Stat. {page}"
+            references['statute_hrefs'].append(statute)
+            continue
+    
+    # Now extract from text patterns
+    element_text = ''.join(element.itertext())
+    
+    # Public Laws in text: "Pub. L. 117-286"
+    pl_text_matches = re.findall(r'Pub\. L\. \d+[-–]\d+', element_text)
+    references['public_laws_text'].extend(pl_text_matches)
+    
+    # Statutes in text: "136 Stat. 4359"
+    stat_text_matches = re.findall(r'\d+ Stat\. \d+', element_text)
+    references['statutes_text'].extend(stat_text_matches)
+    
+    # Executive Orders: "Ex. Ord. No. 12107" or "Executive Order 13526"
+    eo_matches = re.findall(r'(?:Ex\. Ord\. No\.|Executive Order) \d+', element_text)
+    references['executive_orders'].extend(eo_matches)
+    
+    # Federal Register citations: "75 F.R. 707" or "75 F.R. 707, 1013"
+    fr_matches = re.findall(r'\d+ F\.R\. [\d,\s]+', element_text)
+    # Clean up the matches (remove trailing commas/spaces)
+    fr_matches = [match.rstrip(', ') for match in fr_matches]
+    references['federal_register'].extend(fr_matches)
+    
+    # Remove duplicates from each category
+    for key in references:
+        references[key] = list(set(references[key]))
+    
+    # Check if any text references don't have corresponding hrefs
+    text_only_pls = set(references['public_laws_text']) - set(references['public_law_hrefs'])
+    text_only_stats = set(references['statutes_text']) - set(references['statute_hrefs'])
+    
+    if text_only_pls:
+        element_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        element_id = element.get('id', 'no-id')
+        element_identifier = element.get('identifier', 'no-identifier')
+        print(f"WARNING: Found public laws in text without <ref> in <{element_tag}> id='{element_id}' identifier='{element_identifier}': {text_only_pls}")
+    if text_only_stats:
+        element_tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+        element_id = element.get('id', 'no-id')
+        element_identifier = element.get('identifier', 'no-identifier')
+        print(f"WARNING: Found statutes in text without <ref> in <{element_tag}> id='{element_id}' identifier='{element_identifier}': {text_only_stats}")
+    
+    return references
+
+
 def get_related_laws(section: ET.Element) -> Dict[str, List[str]]:
     """
     Extract all types of related laws and references.
@@ -748,135 +785,7 @@ def get_related_laws(section: ET.Element) -> Dict[str, List[str]]:
     return related
 
 
-def build_law_dict(section: ET.Element, filename: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Convert a section element to a comprehensive dictionary.
-    
-    Args:
-        section: Section element
-        filename: Source filename (e.g., 'usc50A.xml')
-        metadata: Document-level metadata dictionary
-        
-    Returns:
-        Dictionary with law information or None if section should be skipped
-    """
-    # Get section status
-    status = get_section_status(section)
-    
-    # Include all sections, not just operational ones
-    
-    # Get section number
-    num_elem = section.find('.//uslm:num', NAMESPACE)
-    if num_elem is None:
-        return None
-        
-    section_num_text = num_elem.text or ''
-    # Extract just the number (e.g., "§ 1201." -> "1201")
-    section_match = re.search(r'§?\s*(\d+[a-zA-Z]?)', section_num_text)
-    if not section_match:
-        return None
-    section_number = section_match.group(1)
-    
-    # Get heading
-    heading_elem = section.find('.//uslm:heading', NAMESPACE)
-    heading = heading_elem.text.strip() if heading_elem is not None and heading_elem.text else ''
-    
-    # Get section text
-    text = get_section_text(section)
-    
-    # Get hierarchy
-    hierarchy = get_law_hierarchy(section, title_number, doc_root)
-    
-    # Get parent citation
-    parent_citation = build_parent_citation(hierarchy, title_number)
-    
-    # Get subsection information
-    subsection_info = count_subsections(section)
-    
-    # Get related laws
-    related_laws = get_related_laws(section)
-    
-    # Get notes
-    notes = extract_notes(section)
-    
-    # Get all identifiers
-    identifiers = {
-        'guid': section.get('id'),  # GUID from @id attribute
-        'identifier': section.get('identifier', ''),  # URL path
-        'temporal_id': section.get('temporalId'),  # Temporal ID
-        'name': section.get('name'),  # Legacy name
-        'text_hash': calculate_text_hash(text)  # SHA256 of normalized text
-    }
-    
-    # Get style attribute
-    style = section.get('style', '')
-    
-    # Build citation
-    citation = build_citation(str(title_number), section_number)
-    
-    # Get temporal information
-    created_date = section.get('createdDate')
-    effective_date = section.get('effectiveDate')
-    start_period = section.get('startPeriod')
-    end_period = section.get('endPeriod')
-    
-    # Get XML creation date from document metadata
-    xml_creation_date_olrc = None
-    if doc_root is not None:
-        meta = doc_root.find('.//uslm:meta', NAMESPACE)
-        if meta is not None:
-            # Look for dcterms:created
-            for elem in meta:
-                if elem.tag.endswith('created'):
-                    xml_creation_date_olrc = elem.text
-                    break
-    
-    # Get amendment history
-    amendment_history = extract_amendment_history(section)
-    
-    # Get source credit information
-    source_credit = extract_source_credit(section)
-    
-    return {
-        # Section identification (from section element attributes and children)
-        "law_number": section_number,
-        "law_title": heading,
-        "citation": citation,
-        "identifiers": identifiers,
-        "status": status,
-        
-        # Hierarchy (from parent elements)
-        "title_number": title_number,
-        "is_positive_law": is_positive_law,
-        "law_hierarchy": hierarchy,
-        "parent_citation": parent_citation,
-        
-        # Content (from section content elements)
-        "text_of_law": text,
-        "has_subsections": subsection_info['has_subsections'],
-        "subsection_count": subsection_info['subsection_count'],
-        
-        # Notes and history (from notes elements)
-        "notes": notes,
-        "amendment_history": amendment_history,
-        
-        # Source credit (from sourceCredit element)
-        "source_credit": source_credit,
-        
-        # References (from ref elements throughout)
-        "related_laws": related_laws,
-        
-        # Temporal attributes (from section and document metadata)
-        "created_date": created_date,
-        "effective_date": effective_date,
-        "start_period": start_period,
-        "end_period": end_period,
-        
-        # Document metadata
-        "file_source": filename,
-        "XML_creation_date_OLRC": xml_creation_date_olrc,
-        "style": style
-    }
+# REMOVED: Old build_law_dict function has been consolidated into build_law_dict_with_path
 
 
 def extract_meta(doc: ET.Element) -> Dict[str, Any]:
@@ -946,58 +855,6 @@ def extract_all_element_attributes(element: ET.Element) -> Dict[str, Any]:
     return dict(element.attrib)
 
 
-def build_hierarchy_from_path(full_path: List[Dict[str, Any]], metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Build hierarchy dictionary from ancestor path.
-    
-    Args:
-        full_path: Complete path including section (from traverse_with_ancestor_paths)
-        metadata: Document-level metadata
-        
-    Returns:
-        Hierarchy dictionary with all available levels
-    """
-    hierarchy = {
-        'title': None,
-        'subtitle': None, 
-        'part': None,
-        'subpart': None,
-        'division': None,
-        'subdivision': None,
-        'chapter': None,
-        'subchapter': None,
-        'article': None,
-        'appendix': None,
-        'section': None
-    }
-    
-    # Process each element in the path
-    for path_element in full_path:
-        tag = path_element['tag']
-        if tag in hierarchy:
-            # Extract all available info including all attributes
-            element_info = {
-                'num': path_element['num'],
-                'heading': path_element['heading'],
-                'attributes': path_element.get('attributes', {})
-            }
-            # Remove empty values to keep clean
-            element_info = {k: v for k, v in element_info.items() if v}
-            hierarchy[tag] = element_info
-    
-    # Add title info from metadata if available
-    if hierarchy['title'] is None and metadata.get('dc:title'):
-        title_text = metadata['dc:title']
-        # Extract title number and name
-        title_match = re.match(r'Title (\d+[A-Za-z]*)\s*[-—]\s*(.*)', title_text)
-        if title_match:
-            hierarchy['title'] = {
-                'num': title_match.group(1),
-                'heading': title_match.group(2)
-            }
-    
-    return hierarchy
-
 
 
 
@@ -1015,14 +872,12 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     Returns:
         Dictionary with law information or None if element should be skipped
     """
-    element = element_data['content_element']
+    xml_element = element_data['xml_element']
     element_info = element_data['element_info']
     ancestor_path = element_data['ancestor_path']
-    full_path = element_data['full_path']
-    text_content = element_data['text_content']
     
     # Get element status (use general status function)
-    status = element.get('status', 'operational')
+    status = xml_element.get('status', 'operational')
     
     # Get element number and heading
     element_number = element_info['num']
@@ -1032,13 +887,13 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     
     
     # Extract structured notes for all elements
-    notes_structure = extract_notes_structure(element)
+    notes_structure = extract_notes_structure(xml_element)
     
     # Get additional information only for section elements
     if element_info['tag'] == 'section':
-        subsection_info = count_subsections(element)
-        related_laws = get_related_laws(element)
-        amendment_history = extract_amendment_history(element)
+        subsection_info = count_subsections(xml_element)
+        related_laws = get_related_laws(xml_element)
+        amendment_history = extract_amendment_history(xml_element)
     
     # Get element attributes
     element_attributes = element_info.get('attributes', {})
@@ -1097,7 +952,7 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         return result if result else None
     
     child_elements = {}
-    for child in element:
+    for child in xml_element:
         tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
         content = extract_element_content(child)
         if content:
@@ -1116,18 +971,30 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
     def list_child_elements_in_order():
         """List child elements in the order they appear in the document"""
         child_order = []
-        for child in element:
+        for child in xml_element:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             child_order.append(tag)
         return child_order
     
     # Create document-order readable text
-    def create_document_order_text():
-        """Walk through child elements in order and extract all text"""
+    def create_text_entire():
+        """Walk through element and children in order and extract all text"""
         result_parts = []
         tag_order = []
         
-        for child in element:
+        # First add the element's own num and heading
+        num_elem = xml_element.find('./uslm:num', NAMESPACE)
+        if num_elem is not None and num_elem.text:
+            result_parts.append(num_elem.text)
+            tag_order.append('num')
+            
+        heading_elem = xml_element.find('./uslm:heading', NAMESPACE)
+        if heading_elem is not None and heading_elem.text:
+            result_parts.append(heading_elem.text)
+            tag_order.append('heading')
+        
+        # Then process all child elements
+        for child in xml_element:
             tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
             child_text = ''.join(child.itertext())
             
@@ -1140,14 +1007,15 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         }
     
     # Build computed fields
+    text_entire_result = create_text_entire()
     computed_fields = {
         "processing_timestamp": time.time(),
         "processing_machine": socket.gethostname(),
-        "content_length": len(text_content),
+        "content_length": len(text_entire_result['text']),
         "file_source": filename,
         "ancestors": "; ".join(ancestors),
         "child_elements_order": list_child_elements_in_order(),
-        "document_order_text": create_document_order_text()
+        "text_entire": text_entire_result
     }
     
     # Add section-specific computed fields only for sections
@@ -1160,12 +1028,28 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         })
     
     # Add hierarchical element own content extraction
-    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
-                        'chapter', 'subchapter', 'article', 'appendix'}
-    
-    if element_info['tag'] in hierarchical_tags:
-        own_content_data = extract_own_content_text(element)
+    own_content_data = {}
+    if element_info['tag'] in HIERARCHICAL_TAGS:
+        own_content_data = extract_own_content_text(xml_element)
         computed_fields.update(own_content_data)
+
+    # Extract all references
+    all_references = extract_all_references(xml_element)
+
+    # Build elastic_dict with fields chosen for final RAG dictionary metadata
+    elastic_dict = {
+        "guid": element_attributes.get('id', ''),  # Note: renamed from XML's @id attribute for clarity
+        "element_type": element_info['tag'],
+        "num": element_info['num'],
+        "heading": element_info['heading'],
+        "identifier": element_attributes.get('identifier', ''),
+        "status": element_attributes.get('status', 'no status element found'),
+        "is_positive_law": meta.get('property[@role="is-positive-law"]', 'UNDEFINED'),
+        "attributes": element_attributes,  # All element attributes including temporal fields
+        "references": all_references,
+        "meta": meta,
+        **own_content_data  # Includes text_local, text_local_length, child_pointers, num_children, sourceCredit, notes
+    }
 
     return {
         # Element info
@@ -1177,6 +1061,9 @@ def build_law_dict_with_path(element_data: Dict[str, Any], filename: str, meta: 
         
         # Computed/derived fields (not in original XML)
         "computed": computed_fields,
+        
+        # Fields chosen for final RAG dictionary metadata
+        "elastic_dict": elastic_dict,
         
         # Hierarchical context (ancestor path without current element)
         "ancestor_path": ancestor_path,
@@ -1337,6 +1224,69 @@ def format_element_text(element: ET.Element) -> str:
         return ''.join(element.itertext()).strip()
 
 
+def extract_refs_with_hrefs(element: ET.Element) -> str:
+    """
+    Extract content from an element, converting <ref> elements to "href, text" format.
+    
+    Args:
+        element: XML element containing refs
+        
+    Returns:
+        String with refs formatted as "href, text"
+    """
+    content_parts = []
+    
+    # Add initial text if any
+    if element.text:
+        content_parts.append(element.text)
+    
+    # Process each child
+    for child in xml_element:
+        if child.tag.endswith('ref'):
+            href = child.get('href', '')
+            text = child.text or ''
+            if href and text:
+                content_parts.append(f"{href}, {text}")
+            elif text:
+                content_parts.append(text)
+        else:
+            # For non-ref elements, just get text
+            content_parts.append(''.join(child.itertext()))
+        
+        # Add tail text after the child
+        if child.tail:
+            content_parts.append(child.tail)
+    
+    return ''.join(content_parts)
+
+
+def extract_notes_by_topic(notes_elem: ET.Element) -> Dict[str, str]:
+    """
+    Extract all notes content organized by topic.
+    
+    Args:
+        notes_elem: Notes element
+        
+    Returns:
+        Dictionary with topic as key and notes content as value
+    """
+    notes_by_topic = {}
+    
+    # Process each note
+    for note in notes_elem.findall('./uslm:note', NAMESPACE):
+        topic = note.get('topic', 'unknown')
+        note_content = extract_refs_with_hrefs(note)
+        
+        if note_content:
+            # If multiple notes have same topic, combine them
+            if topic in notes_by_topic:
+                notes_by_topic[topic] += '\n\n' + note_content
+            else:
+                notes_by_topic[topic] = note_content
+    
+    return notes_by_topic
+
+
 def extract_own_content_text(element: ET.Element) -> Dict[str, Any]:
     """
     Extract an element's own text content, excluding child sections/subchapters.
@@ -1346,19 +1296,29 @@ def extract_own_content_text(element: ET.Element) -> Dict[str, Any]:
         element: XML element
         
     Returns:
-        Dictionary with own_content_text, child_pointers, etc.
+        Dictionary with own_content_text, child_pointers, sourceCredit, etc.
     """
-    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
-                        'chapter', 'subchapter', 'article', 'appendix'}
     
     own_content_parts = []
     child_pointers = []
+    source_credit_text = ''
+    notes_dict = {}
     
-    for child in element:
+    # First, add the element's own num and heading
+    num_elem = element.find('./uslm:num', NAMESPACE)
+    if num_elem is not None and num_elem.text:
+        own_content_parts.append(num_elem.text)
+    
+    heading_elem = element.find('./uslm:heading', NAMESPACE)
+    if heading_elem is not None and heading_elem.text:
+        own_content_parts.append(heading_elem.text)
+    
+    # Process all child elements
+    for child in xml_element:
         child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
         
-        # Skip child hierarchical elements and sections - create pointers
-        if child_tag in hierarchical_tags or child_tag == 'section':
+        # Major structural elements - just create pointers
+        if child_tag in HIERARCHICAL_TAGS:
             child_num_elem = child.find('./uslm:num', NAMESPACE)
             child_num = child_num_elem.text.strip() if child_num_elem is not None and child_num_elem.text else ''
             child_identifier = child.get('identifier', '')
@@ -1371,19 +1331,45 @@ def extract_own_content_text(element: ET.Element) -> Dict[str, Any]:
                 'heading': child_heading,
                 'identifier': child_identifier
             })
+            
+        # Known element types with specialized parsers
+        elif child_tag == 'toc':
+            toc_text = parse_toc(child)
+            if toc_text:
+                own_content_parts.append(toc_text)
+                
+        elif child_tag == 'notes':
+            notes_dict = extract_notes_by_topic(child)
+            # Also add to own_content_parts for text searching
+            for topic, content in notes_dict.items():
+                own_content_parts.append(f"{topic}:\n{content}")
+                
+        elif child_tag == 'sourceCredit':
+            source_credit_text = extract_refs_with_hrefs(child)
+            if source_credit_text:
+                own_content_parts.append(f"Source Credit: {source_credit_text}")
+            
+        # Default handler for unknown elements
         else:
-            # Include this as own content with better formatting
-            child_text = format_element_text(child)
+            # Extract heading if present
+            child_heading = child.find('./uslm:heading', NAMESPACE)
+            if child_heading is not None and child_heading.text:
+                own_content_parts.append(child_heading.text.strip())
+            
+            # Extract text content from the child element
+            child_text = get_element_text_content(child)
             if child_text:
                 own_content_parts.append(child_text)
     
-    own_content_text = '\n\n'.join(own_content_parts)
+    text_local = '\n\n'.join(own_content_parts)
     
     return {
-        "own_content_text": own_content_text,
-        "own_content_length": len(own_content_text),
+        "text_local": text_local,
+        "text_local_length": len(text_local),
         "child_pointers": child_pointers,
-        "num_children": len(child_pointers)
+        "num_children": len(child_pointers),
+        "sourceCredit": source_credit_text,
+        "notes": notes_dict
     }
 
 
@@ -1399,16 +1385,14 @@ def extract_hierarchical_own_content(element_data: Dict[str, Any]) -> Dict[str, 
     Returns:
         Dictionary with element's own content and child pointers
     """
-    element = element_data['content_element']
+    xml_element = element_data['xml_element']
     element_info = element_data['element_info']
     
     tag = element_info['tag']
     
     # Only process hierarchical container elements
-    hierarchical_tags = {'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
-                        'chapter', 'subchapter', 'article', 'appendix'}
     
-    if tag not in hierarchical_tags:
+    if tag not in HIERARCHICAL_TAGS:
         return None
     
     # Define helper function first
@@ -1443,11 +1427,11 @@ def extract_hierarchical_own_content(element_data: Dict[str, Any]) -> Dict[str, 
     own_child_elements = {}
     child_pointers = []
     
-    for child in element:
+    for child in xml_element:
         child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
         
         # Skip child hierarchical elements and sections - just create pointers
-        if child_tag in hierarchical_tags or child_tag == 'section':
+        if child_tag in HIERARCHICAL_TAGS:
             child_num_elem = child.find('./uslm:num', NAMESPACE)
             child_num = child_num_elem.text.strip() if child_num_elem is not None and child_num_elem.text else ''
             child_identifier = child.get('identifier', '')
@@ -1474,11 +1458,11 @@ def extract_hierarchical_own_content(element_data: Dict[str, Any]) -> Dict[str, 
     
     # Extract readable text content (excluding sections/subchapters)
     content_text_parts = []
-    for child in element:
+    for child in xml_element:
         child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
         
         # Skip child hierarchical elements and sections
-        if child_tag not in hierarchical_tags and child_tag != 'section':
+        if child_tag not in HIERARCHICAL_TAGS:
             child_text = ''.join(child.itertext()).strip()
             if child_text:
                 content_text_parts.append(child_text)
