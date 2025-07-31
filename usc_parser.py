@@ -55,7 +55,9 @@ DEFAULT_XML_DIR = "xml_uscAll@119-12"
 # Define hierarchical structural elements that should be part of the path
 HIERARCHICAL_TAGS = {
     'title', 'subtitle', 'part', 'subpart', 'division', 'subdivision',
-    'chapter', 'subchapter', 'article', 'appendix', 'section'
+    'chapter', 'subchapter', 'article', 'appendix', 'section',
+    'subsection', 'paragraph', 'subparagraph', 'clause', 'subclause',
+    'item', 'subitem'
 }
 
 
@@ -146,30 +148,6 @@ def helper_find_all_tags(element: ET.Element, tags_counter: Dict[str, int] = Non
     return tags_counter
 
 
-def get_element_text_content(element: ET.Element) -> str:
-    """
-    Extract all text content from an element, similar to get_section_text.
-    
-    Args:
-        element: XML element
-        
-    Returns:
-        Complete text content of the element
-    """
-    text_parts = []
-    
-    def extract_text_recursive(elem):
-        if elem.text:
-            text_parts.append(elem.text.strip())
-        for child in elem:
-            # Skip certain metadata elements
-            if not child.tag.endswith(('sourceCredit', 'meta')):
-                extract_text_recursive(child)
-            if child.tail:
-                text_parts.append(child.tail.strip())
-    
-    extract_text_recursive(element)
-    return ' '.join(text_parts)
 
 
 def traverse_with_ancestor_paths(xml_element: ET.Element, current_path: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
@@ -194,10 +172,10 @@ def traverse_with_ancestor_paths(xml_element: ET.Element, current_path: List[Dic
     
     # Get basic element info
     num_elem = xml_element.find('./uslm:num', NAMESPACE)
-    num = num_elem.text.strip() if num_elem is not None and num_elem.text else ''
+    num = num_elem.text if num_elem is not None and num_elem.text else ''
     
     heading_elem = xml_element.find('./uslm:heading', NAMESPACE)
-    heading = heading_elem.text.strip() if heading_elem is not None and heading_elem.text else ''
+    heading = heading_elem.text if heading_elem is not None and heading_elem.text else ''
     
     # Build element info with ALL attributes preserved
     element_info = {
@@ -296,7 +274,7 @@ def extract_amendment_history(section: ET.Element) -> List[Dict[str, str]]:
                 if year_match:
                     amendment = {
                         'year': year_match.group(1),
-                        'text': p_text.strip(),
+                        'text': p_text,
                         'date': None,
                         'public_law': None,
                         'statutes_at_large': None
@@ -351,15 +329,25 @@ def extract_all_references(xml_element: ET.Element) -> Dict[str, Dict[str, List[
     local_refs = create_empty_refs()
     child_refs = create_empty_refs()
     
-    # Process ref elements, separating local from children
-    # Local refs: direct children only
-    for ref in xml_element.findall('./uslm:ref', NAMESPACE):
-        process_ref_element(ref, local_refs)
-    
-    # Child refs: all descendant refs excluding direct children
+    # Process all ref elements in the document
     for ref in xml_element.findall('.//uslm:ref', NAMESPACE):
-        if ref.getparent() != xml_element:  # Not a direct child
+        # Determine if this ref belongs to a hierarchical child
+        parent = ref.getparent()
+        belongs_to_hierarchical_child = False
+        
+        # Walk up the tree to see if any ancestor is a hierarchical child
+        while parent is not None and parent != xml_element:
+            parent_tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+            if parent_tag in HIERARCHICAL_TAGS:
+                belongs_to_hierarchical_child = True
+                break
+            parent = parent.getparent()
+        
+        # Add to appropriate reference list
+        if belongs_to_hierarchical_child:
             process_ref_element(ref, child_refs)
+        else:
+            process_ref_element(ref, local_refs)
     
     # Extract text patterns from local content only (excluding hierarchical children)
     local_text = extract_local_text_only(xml_element)
@@ -601,7 +589,7 @@ def build_dict(element_data: Dict[str, Any], filename: str, meta: Dict[str, Any]
         attrs = dict(elem.attrib) if elem.attrib else {}
         
         # Get direct text content
-        text = elem.text.strip() if elem.text else ''
+        text = elem.text if elem.text else ''
         
         # Get child elements in document order
         children_in_order = []
@@ -625,13 +613,13 @@ def build_dict(element_data: Dict[str, Any], filename: str, meta: Dict[str, Any]
             
         # For elements with children, also capture the complete text content
         if children_in_order and tag == 'p':
-            full_text = ''.join(elem.itertext()).strip()
+            full_text = ''.join(elem.itertext())
             if full_text:
                 result['paragraph_text'] = full_text
         
         # If element has no attributes, text, or children, return the tail text if any
-        if not result and elem.tail and elem.tail.strip():
-            return elem.tail.strip()
+        if not result and elem.tail:
+            return elem.tail
         
         return result if result else None
     
@@ -652,45 +640,13 @@ def build_dict(element_data: Dict[str, Any], filename: str, meta: Dict[str, Any]
     
     
     
-    # Create document-order readable text
-    def create_text_entire():
-        """Walk through element and children in order and extract all text"""
-        result_parts = []
-        tag_order = []
-        
-        # First add the element's own num and heading
-        num_elem = xml_element.find('./uslm:num', NAMESPACE)
-        if num_elem is not None and num_elem.text:
-            result_parts.append(num_elem.text)
-            tag_order.append('num')
-            
-        heading_elem = xml_element.find('./uslm:heading', NAMESPACE)
-        if heading_elem is not None and heading_elem.text:
-            result_parts.append(heading_elem.text)
-            tag_order.append('heading')
-        
-        # Then process all child elements
-        for child in xml_element:
-            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-            child_text = ''.join(child.itertext())
-            
-            result_parts.append(child_text)
-            tag_order.append(tag)
-        
-        return {
-            'text': '\n\n'.join(result_parts),
-            'tag_order': ' -> '.join(tag_order)
-        }
     
     # Build computed fields
-    text_entire_result = create_text_entire()
     computed_fields = {
         "processing_timestamp": time.time(),
         "processing_machine": socket.gethostname(),
-        "content_length": len(text_entire_result['text']),
         "file_source": filename,
-        "ancestors": "; ".join(ancestors),
-        "text_entire": text_entire_result
+        "ancestors": "; ".join(ancestors)
     }
     
     # Add amendment history to computed fields
@@ -770,14 +726,14 @@ def parse_toc(toc_element: ET.Element) -> str:
     header = toc_element.find('.//uslm:header[@role="tocColumnHeader"]', NAMESPACE)
     header_text = ""
     if header is not None:
-        header_text = ''.join(header.itertext()).strip()
+        header_text = ''.join(header.itertext())
     
     for item in toc_element.findall('.//uslm:tocItem', NAMESPACE):
         left_col = item.find('.//uslm:column[@class="twoColumnLeft"]', NAMESPACE)  
         right_col = item.find('.//uslm:column[@class="twoColumnRight"]', NAMESPACE)
         
         if left_col is not None and right_col is not None:
-            left_text = ''.join(left_col.itertext()).strip()
+            left_text = ''.join(left_col.itertext())
             
             # Process right column: collect text with references, collect footnotes
             right_text_parts = []
@@ -785,7 +741,7 @@ def parse_toc(toc_element: ET.Element) -> str:
             
             def process_right_col(elem):
                 if elem.text:
-                    right_text_parts.append(elem.text.strip())
+                    right_text_parts.append(elem.text)
                 
                 for child in elem:
                     child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
@@ -793,10 +749,10 @@ def parse_toc(toc_element: ET.Element) -> str:
                     if child_tag == 'ref' and 'footnoteRef' in child.get('class', ''):
                         # Add inline reference
                         if child.text:
-                            right_text_parts.append(f"[{child.text.strip()}]")
+                            right_text_parts.append(f"[{child.text}]")
                     elif child_tag == 'note' and child.get('type') == 'footnote':
                         # Collect footnote for bottom section
-                        footnote_text = ''.join(child.itertext()).strip()
+                        footnote_text = ''.join(child.itertext())
                         if footnote_text:
                             footnotes_in_this_item.append(footnote_text)
                     else:
@@ -804,10 +760,10 @@ def parse_toc(toc_element: ET.Element) -> str:
                         process_right_col(child)
                     
                     if child.tail:
-                        right_text_parts.append(child.tail.strip())
+                        right_text_parts.append(child.tail)
             
             process_right_col(right_col)
-            right_text = ' '.join(right_text_parts).strip()
+            right_text = ' '.join(right_text_parts)
             
             # Add this line to TOC
             if left_text and right_text:
@@ -831,81 +787,117 @@ def parse_toc(toc_element: ET.Element) -> str:
         return toc_text
 
 
-def extract_refs_with_hrefs(xml_element: ET.Element) -> str:
+def extract_table(table_elem: ET.Element) -> str:
     """
-    Extract content from an element, converting <ref> elements to "href, text" format.
+    Extract table content with basic formatting.
     
     Args:
-        xml_element: XML element containing refs
+        table_elem: Table XML element
         
     Returns:
-        String with refs formatted as "href, text"
+        String with table content formatted with tabs between cells and newlines between rows
     """
-    content_parts = []
+    rows = []
     
-    # Add initial text if any
-    if xml_element.text:
-        content_parts.append(xml_element.text)
+    # Process all descendant elements looking for table rows
+    for elem in table_elem.iter():
+        if elem.tag.endswith('tr'):
+            cells = []
+            # Process all children looking for table cells
+            for cell in elem:
+                if cell.tag.endswith('th') or cell.tag.endswith('td'):
+                    # Extract text from each <p> element within the cell
+                    p_texts = []
+                    for p in cell.iter():
+                        if p.tag.endswith('p'):
+                            p_text = ''.join(p.itertext())
+                            if p_text:
+                                p_texts.append(p_text)
+                    
+                    # If no <p> elements, just get all text
+                    if not p_texts:
+                        cell_text = ''.join(cell.itertext())
+                    else:
+                        # Join multiple <p> elements with space
+                        cell_text = ' '.join(p_texts)
+                    
+                    if cell_text:
+                        cells.append(cell_text)
+            if cells:
+                # Join cells with tabs to create tab-delimited format
+                # Note: Tab width varies by display; empty cells may not be visually distinct
+                rows.append('\t'.join(cells))
     
-    # Process each child
-    for child in xml_element:
-        if child.tag.endswith('ref'):
-            href = child.get('href', '')
-            text = child.text or ''
-            if href and text:
-                content_parts.append(f"{href}, {text}")
-            elif text:
-                content_parts.append(text)
-        else:
-            # For non-ref elements, just get text
-            content_parts.append(''.join(child.itertext()))
-        
-        # Add tail text after the child
-        if child.tail:
-            content_parts.append(child.tail)
-    
-    return ''.join(content_parts)
+    return '\n'.join(rows) if rows else ''
 
 
-def extract_notes(notes_elem: ET.Element) -> Dict[str, Any]:
+
+def extract_notes(notes_elem: ET.Element) -> List[Dict[str, Any]]:
     """
-    Extract all notes content organized by topic.
+    Extract all notes content in document order.
     
     Args:
         notes_elem: Notes element
         
     Returns:
-        Dictionary with topic as key and notes info as value
+        List of note dictionaries with topic, role, and content
     """
-    notes_by_topic = {}
+    notes_list = []
     
-    # Process each note
-    for note in notes_elem.findall('./uslm:note', NAMESPACE):
+    # Process each note in document order
+    for note in notes_elem:
+        # Skip non-note elements
+        if not note.tag.endswith('note'):
+            continue
+            
         topic = note.get('topic')
         if topic is None:
-            raise ValueError(f"Note element missing required 'topic' attribute")
-        role = note.get('role')
-        if role is None:
-            role = 'none'
-        note_content = extract_refs_with_hrefs(note)
+            continue  # Skip notes without topics
+            
+        role = note.get('role', 'none')
+        
+        # Extract note content with proper handling of tables and other elements
+        content_parts = []
+        
+        # Add initial text if any
+        if note.text:
+            content_parts.append(note.text)
+        
+        # Process child elements
+        for child in note:
+            child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            
+            if child_tag == 'table':
+                # Extract table with formatting
+                table_text = extract_table(child)
+                if table_text:
+                    content_parts.append(f"\n{table_text}\n")
+            elif child_tag == 'p':
+                # Add paragraph with newlines
+                p_text = ''.join(child.itertext())
+                if p_text:
+                    content_parts.append(f"\n{p_text}")
+            else:
+                # For other elements, just get text
+                elem_text = ''.join(child.itertext())
+                if elem_text:
+                    content_parts.append(elem_text)
+            
+            # Add tail text after the child
+            if child.tail:
+                content_parts.append(child.tail)
+        
+        note_content = ' '.join(content_parts)
         
         if note_content:
-            # Create note entry with content and role
-            note_entry = {
-                'content': note_content,
-                'role': role
-            }
-                
-            # If multiple notes have same topic, combine them
-            if topic in notes_by_topic:
-                # Convert to list if not already
-                if not isinstance(notes_by_topic[topic], list):
-                    notes_by_topic[topic] = [notes_by_topic[topic]]
-                notes_by_topic[topic].append(note_entry)
-            else:
-                notes_by_topic[topic] = note_entry
+            # Add note to list preserving document order
+            notes_list.append({
+                'topic': topic,
+                'role': role,
+                'content': note_content
+            })
     
-    return notes_by_topic
+    return notes_list
 
 
 def extract_own_content_text(xml_element: ET.Element) -> Dict[str, Any]:
@@ -923,7 +915,7 @@ def extract_own_content_text(xml_element: ET.Element) -> Dict[str, Any]:
     own_content_parts = []
     child_pointers = []
     source_credit_text = ''
-    notes_dict = {}
+    notes_dict = []
     
     # Process all child elements
     for child in xml_element:
@@ -932,10 +924,10 @@ def extract_own_content_text(xml_element: ET.Element) -> Dict[str, Any]:
         # Major structural elements - just create pointers
         if child_tag in HIERARCHICAL_TAGS:
             child_num_elem = child.find('./uslm:num', NAMESPACE)
-            child_num = child_num_elem.text.strip() if child_num_elem is not None and child_num_elem.text else ''
+            child_num = child_num_elem.text if child_num_elem is not None and child_num_elem.text else ''
             child_identifier = child.get('identifier', '')
             child_heading_elem = child.find('./uslm:heading', NAMESPACE)
-            child_heading = child_heading_elem.text.strip() if child_heading_elem is not None and child_heading_elem.text else ''
+            child_heading = child_heading_elem.text if child_heading_elem is not None and child_heading_elem.text else ''
             
             child_pointers.append({
                 'tag': child_tag,
@@ -951,25 +943,33 @@ def extract_own_content_text(xml_element: ET.Element) -> Dict[str, Any]:
                 own_content_parts.append(toc_text)
                 
         elif child_tag == 'notes':
-            notes_dict = extract_notes(child)
-            # Also add to own_content_parts for text searching
-            for topic, content in notes_dict.items():
-                own_content_parts.append(f"{topic}:\n{content}")
+            notes_list = extract_notes(child)
+            # Add notes to own_content_parts in document order
+            for note in notes_list:
+                own_content_parts.append(note['content'])
+            # Store for structured access
+            notes_dict = notes_list
                 
         elif child_tag == 'sourceCredit':
-            source_credit_text = extract_refs_with_hrefs(child)
+            source_credit_text = ''.join(child.itertext())
             if source_credit_text:
-                own_content_parts.append(f"Source Credit: {source_credit_text}")
+                own_content_parts.append(source_credit_text)
+                
+        elif child_tag == 'table':
+            # Extract table with proper formatting
+            table_text = extract_table(child)
+            if table_text:
+                own_content_parts.append(table_text)
+                
+        elif child_tag == 'p':
+            # Add paragraph text with proper spacing
+            p_text = ''.join(child.itertext()).strip()
+            if p_text:
+                own_content_parts.append(p_text)
             
         # Default handler for unknown elements
         else:
-            # Extract heading if present
-            child_heading = child.find('./uslm:heading', NAMESPACE)
-            if child_heading is not None and child_heading.text:
-                own_content_parts.append(child_heading.text.strip())
-            
-            # Extract text content from the child element
-            child_text = get_element_text_content(child)
+            child_text = ''.join(child.itertext())
             if child_text:
                 own_content_parts.append(child_text)
     
@@ -1109,6 +1109,68 @@ def main():
         parser.error("Please specify either --title or --all")
 
 
+def filter_elements(elements: List[Dict[str, Any]], element_type: str = None, element_num: str = None) -> List[Dict[str, Any]]:
+    """
+    Filter elements by type and/or number.
+    
+    Args:
+        elements: List of element dictionaries
+        element_type: Element type to filter by (e.g., 'section', 'chapter')
+        element_num: Element number to filter by (e.g., '552', '5')
+        
+    Returns:
+        Filtered list of elements
+    """
+    filtered = elements
+    
+    if element_type:
+        filtered = [elem for elem in filtered if elem['tag'] == element_type]
+        print(f"Filtered to {len(filtered)} {element_type} elements")
+    
+    if element_num:
+        def num_equals(elem, search_num):
+            return elem['elastic_dict']['num_numeric'] == search_num
+        
+        filtered = [elem for elem in filtered if num_equals(elem, element_num)]
+        print(f"Filtered to {len(filtered)} elements with num equal to '{element_num}'")
+    
+    return filtered
+
+
+def print_dict(element: Dict[str, Any], elastic_only: bool = False) -> None:
+    """
+    Print a single element dictionary.
+    
+    Args:
+        element: Element dictionary to print
+        elastic_only: If True, only print elastic_dict portion
+    """
+    if elastic_only:
+        elastic = element['elastic_dict']
+        for key, value in elastic.items():
+            print(f"\n----------------------{key}---------------------")
+            if key == 'notes' and isinstance(value, dict):
+                # Special handling for notes to show nested structure
+                for note_type, note_content in value.items():
+                    print(f"\n{note_type}:")
+                    if isinstance(note_content, dict):
+                        if 'content' in note_content:
+                            print(note_content['content'])
+                    elif isinstance(note_content, list):
+                        for item in note_content:
+                            if isinstance(item, dict) and 'content' in item:
+                                print(item['content'])
+                    else:
+                        print(note_content)
+            elif isinstance(value, dict):
+                # For other dict values, print as JSON
+                print(json.dumps(value, indent=2, ensure_ascii=False))
+            else:
+                print(value)
+    else:
+        print(json.dumps(element, indent=4, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     import argparse
     import json
@@ -1116,10 +1178,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Parse USC XML files')
     parser.add_argument('--title', required=True, help='USC title to parse (e.g., usc05, usc50A)')
     parser.add_argument('--xml-dir', default='xml_uscAll@119-12', help='Directory containing XML files')
-    parser.add_argument('--output', help='Output JSON file (optional)')
+    parser.add_argument('--output-dir', help='Output directory for JSON files (optional)')
     parser.add_argument('--type', help='Filter by element type (e.g., section, chapter, note)')
     parser.add_argument('--num', help='Filter by exact element number (e.g., 1, 10, 1201)')
     parser.add_argument('--elastic-only', action='store_true', help='Only display elastic_dict portion of results')
+    parser.add_argument('--int', action='store_true', help='Interactive mode - query sections interactively')
     
     args = parser.parse_args()
     
@@ -1127,50 +1190,70 @@ if __name__ == "__main__":
     filepath = f"{args.xml_dir}/{args.title}.xml"
     
     print(f"Parsing {filepath}...")
-    laws = parse_single_title(filepath)
-    print(f"Found {len(laws)} elements")
+    elements = parse_single_title(filepath)
+    print(f"Found {len(elements)} elements")
     
-    # Apply filters
-    filtered_laws = laws
-    if args.type:
-        filtered_laws = [law for law in filtered_laws if law['tag'] == args.type]
-        print(f"Filtered to {len(filtered_laws)} {args.type} elements")
-    
-    if args.num:
-        def num_equals(law, search_num):
-            return law['elastic_dict']['num_numeric'] == search_num
+    # Interactive mode
+    if args.int:
+        print("\nInteractive mode. Examples: sec 552, ch 5, q to quit")
         
-        filtered_laws = [law for law in filtered_laws if num_equals(law, args.num)]
-        print(f"Filtered to {len(filtered_laws)} elements with num equal to '{args.num}'")
-    
-    # Show summary by element type if no specific filters
-    if not args.type and not args.num:
-        from collections import Counter
-        element_counts = Counter(law['tag'] for law in laws)
-        print("\nElement types found:")
-        for tag, count in sorted(element_counts.items()):
-            print(f"  {tag}: {count}")
-    
-    # Save to JSON if requested
-    if args.output_dir:
-        output_file = os.path.join(args.output_dir, f"{args.title}_filtered.json")
-        with open(output_file, 'w') as f:
-            json.dump(filtered_laws, f, indent=2, ensure_ascii=False)
-        print(f"\nSaved {len(filtered_laws)} elements to {output_file}")
-    else:
-        # Show filtered results with pretty printing
-        display_laws = filtered_laws[:10]  # Show up to 10 results
-        print(f"\nShowing first {len(display_laws)} results:")
-        for i, law in enumerate(display_laws):
-            print(f"\n{i+1}. Element:")
+        while True:
+            query = input("\nQuery> ").strip().lower()
+            if query == 'q' or query == 'quit':
+                break
             
-            if args.elastic_only:
-                elastic = law['elastic_dict']
-                for key, value in elastic.items():
-                    print(f"\n-----------------{key}----------------")
-                    print(value)
+            # Parse query
+            parts = query.split()
+            if len(parts) < 2:
+                print("Please enter a query like 'sec 552' or 'chapter 5'")
+                continue
+            
+            # Determine element type
+            query_type = parts[0]
+            query_num = ' '.join(parts[1:])
+            
+            # Map common abbreviations to full names
+            type_map = {
+                'sec': 'section',
+                'ch': 'chapter',
+                'subch': 'subchapter',
+                'pt': 'part',
+                'subpt': 'subpart',
+                'div': 'division',
+                'subdiv': 'subdivision'
+            }
+            
+            if query_type in type_map:
+                query_type = type_map[query_type]
+            
+            # Filter and display
+            filtered = filter_elements(elements, element_type=query_type, element_num=query_num)
+            
+            if not filtered:
+                print(f"No matches found")
             else:
-                print(json.dumps(law, indent=4, ensure_ascii=False))
+                for elem in filtered:
+                    print(f"\n{'='*80}")
+                    print_dict(elem, elastic_only=args.elastic_only)
+    
+    # Non-interactive mode
+    else:
+        # Apply filters
+        filtered_elements = filter_elements(elements, element_type=args.type, element_num=args.num)
         
-        if len(filtered_laws) > 10:
-            print(f"\n... and {len(filtered_laws) - 10} more results")
+        # Save to JSON if requested
+        if args.output_dir:
+            output_file = os.path.join(args.output_dir, f"{args.title}.json")
+            with open(output_file, 'w') as f:
+                json.dump(filtered_elements, f, indent=2, ensure_ascii=False)
+            print(f"\nSaved {len(filtered_elements)} elements to {output_file}")
+        else:
+            # Show filtered results with pretty printing
+            display_elements = filtered_elements[:10]  # Show up to 10 results
+            print(f"\nShowing first {len(display_elements)} results:")
+            for i, elem in enumerate(display_elements):
+                print(f"\n{i+1}. Element:")
+                print_dict(elem, elastic_only=args.elastic_only)
+            
+            if len(filtered_elements) > 10:
+                print(f"\n... and {len(filtered_elements) - 10} more results")
